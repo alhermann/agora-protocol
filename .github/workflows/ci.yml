@@ -1,0 +1,7 @@
+name: CI
+on: workflow_dispatch
+jobs:
+  skip:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo 'CI disabled during development'
