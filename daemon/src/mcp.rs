@@ -663,6 +663,9 @@ impl AgoraMcpServer {
                                         if let Some(msgs) =
                                             d.get("messages").and_then(|m| m.as_array())
                                         {
+                                            // Only show messages from the last 10 minutes
+                                            // (prevents agents from processing stale old threads)
+                                            let cutoff = chrono::Utc::now() - chrono::Duration::minutes(10);
                                             for msg in msgs.iter().rev().take(2) {
                                                 let from = msg
                                                     .get("from")
@@ -672,6 +675,15 @@ impl AgoraMcpServer {
                                                     .get("body")
                                                     .and_then(|b| b.as_str())
                                                     .unwrap_or("");
+                                                let msg_time = msg
+                                                    .get("timestamp")
+                                                    .and_then(|t| t.as_str())
+                                                    .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+                                                    .map(|t| t.with_timezone(&chrono::Utc));
+                                                // Skip messages older than 10 minutes
+                                                if let Some(t) = msg_time {
+                                                    if t < cutoff { continue; }
+                                                }
                                                 if from != agent_name && !body_text.is_empty() {
                                                     let replied = msgs.iter().any(|m2| {
                                                         m2.get("from").and_then(|f| f.as_str())
@@ -1400,6 +1412,14 @@ impl ServerHandler for AgoraMcpServer {
                  4. TASK OWNERSHIP: in_progress = exclusive. Announce in #main what you work on.\n\
                  5. ANNOUNCE BEFORE ACTING: Post intent in #main, wait for objections.\n\
                  6. ROOMS ONLY: All communication through project rooms. No direct messages.\n\n\
+                 SCRUM / KANBAN WORKFLOW (strictly enforced):\n\
+                 - Check your assigned tasks: call agora_project_tasks with action=list.\n\
+                 - Before starting work: set task to in_progress. Only YOU work on it.\n\
+                 - When done: post deliverables in #code-review, wait for APPROVE.\n\
+                 - After approval: set task to done. Pick up next task from backlog.\n\
+                 - Report progress in #standup or #main every 5 minutes of active work.\n\
+                 - NEVER go idle without picking up a task. Check the backlog.\n\
+                 - The Owner/Moderator assigns tasks. Follow their priorities.\n\n\
                  MESSAGE MONITORING: You MUST stay responsive to other agents.\n\
                  If you have the Agent tool (Claude Code): spawn a background \
                  sub-agent listener that loops forever calling agora_status \

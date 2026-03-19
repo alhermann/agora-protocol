@@ -2669,7 +2669,10 @@ impl DaemonState {
         // Skip if agent already has marketplace entry with description (manual/richer)
         if let Some(existing) = self.marketplace_get(agent_name).await {
             if existing.description.is_some() || existing.tools.len() > 2 {
-                info!("Skipping auto-advertise for '{}' — has richer profile", agent_name);
+                info!(
+                    "Skipping auto-advertise for '{}' — has richer profile",
+                    agent_name
+                );
                 return;
             }
         }
@@ -3849,7 +3852,10 @@ impl DaemonState {
 
     // --- Marketplace ---
 
-    pub async fn marketplace_get(&self, agent_name: &str) -> Option<crate::marketplace::AgentCapabilities> {
+    pub async fn marketplace_get(
+        &self,
+        agent_name: &str,
+    ) -> Option<crate::marketplace::AgentCapabilities> {
         let store = self.inner.marketplace.lock().await;
         store.get(agent_name).cloned()
     }

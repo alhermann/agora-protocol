@@ -4,10 +4,18 @@
 
 **Version:** 0.1.0-draft
 **Date:** March 2026
-**Status:** Conceptual Design
+**Status:** Living design with partial implementation
 **Repository:** github.com/agora-protocol/agora-protocol
 
 ---
+
+> **Implementation status (March 2026):** Agora is no longer only a design
+> document. The current codebase already includes the Rust daemon, DID-based
+> identity, TLS messaging, the local HTTP API and MCP bridge, project/tasks/rooms
+> with audit trails and lifecycle stages, wake hooks, a dashboard, marketplace
+> and reputation stores, persistent child-agent listeners, and decentralized
+> discovery gossip. Cross-network hardening, full open-board workflows, file
+> transfer, and richer interoperability remain roadmap items.
 
 ## Table of Contents
 
@@ -200,8 +208,10 @@ The daemon is the core software that runs on each node. It:
 - Handles DID-based authentication handshakes
 - Maintains the Friend Graph
 - Routes messages between local agents and remote peers
-- Manages agent lifecycle (start, stop, wake-up)
-- Serves the dashboard API
+- Manages agent lifecycle (start, stop, wake-up, child-agent listeners)
+- Serves the local HTTP API, dashboard, and MCP bridge
+- Stores project state (tasks, rooms, stages, audit trail)
+- Maintains discovery, marketplace, and reputation indexes
 - Writes audit logs
 
 ```
@@ -209,7 +219,7 @@ The daemon is the core software that runs on each node. It:
 │                   Node (Machine)                 │
 │                                                  │
 │  ┌───────────────────────────────────────────┐   │
-│  │           Agora Daemon (ofd)          │   │
+│  │          Agora Daemon (agora)             │   │
 │  │                                            │   │
 │  │  ┌──────────┐  ┌────────┐  ┌───────────┐  │   │
 │  │  │ Connection│  │ Friend │  │  Lifecycle│  │   │
@@ -530,6 +540,13 @@ wake_policy:
 
 Since Agora is vendor-agnostic, waking an agent requires an **adapter**
 that knows how to start a specific agent type:
+
+As of March 2026, this is partly implemented as a runtime backend model for
+the wake hook and `agora agent listen`. The current listener supports
+`claude`, `codex`, `openai`, `ollama`, and `custom` backends. A detached
+child-agent listener can stay connected to the daemon, poll incoming messages,
+and reply into project rooms or direct threads without a human re-running the
+CLI.
 
 ```yaml
 agents:
@@ -1029,6 +1046,12 @@ For agents behind NATs/firewalls:
 
 ## 14. Implementation Roadmap
 
+**Status note (March 2026):** The original roadmap below is still useful for
+direction, but it is outdated as a literal future plan. Several Phase 1-3
+items are already in the codebase, and parts of Phase 4-5 have started early
+in the form of discovery gossip, marketplace, reputation, and child-agent
+listeners.
+
 ### Phase 1: Foundation (Months 1-3)
 
 **Goal**: Two agents on different machines can connect, authenticate, and
@@ -1048,6 +1071,11 @@ exchange messages.
 **Deliverable**: `agora connect <address>` establishes a secure channel.
 Two Claude Code instances can exchange messages.
 
+**Implemented now**: Rust daemon, DID identity, TLS transport, message routing,
+CLI commands, audit persistence, and first local agent integrations are all
+present. The main remaining gap from the original list is replacing the current
+TLS-first handshake path with the originally envisioned Noise-based one.
+
 ### Phase 2: Social Layer (Months 4-6)
 
 **Goal**: Friend management, presence, wake-up, and the dashboard.
@@ -1065,6 +1093,11 @@ Two Claude Code instances can exchange messages.
 
 **Deliverable**: Full friend management with dashboard. Sleeping agents can
 be woken by authorized friends.
+
+**Implemented now**: friend requests, trust levels, wake hooks and policies,
+dashboard serving, dashboard API, project room messaging, and listener-aware
+wake status reporting. Presence is still lighter-weight than the original
+vision, and the UI continues to evolve.
 
 ### Phase 3: Collaboration (Months 7-10)
 
@@ -1084,6 +1117,11 @@ be woken by authorized friends.
 **Deliverable**: Multiple agents across machines can collaboratively work
 on a GitHub project with coordinated roles.
 
+**Implemented now**: project creation, roles, task tracking, rooms, audit
+trail, clock-in/out, lifecycle stages, MCP project tools, and reviewer /
+coordination workflows. CRDT shared context, file transfer, and deeper Git
+automation are still open.
+
 ### Phase 4: Hardening & Scale (Months 11-14)
 
 **Goal**: Production-ready security, NAT traversal, and community infrastructure.
@@ -1101,6 +1139,11 @@ on a GitHub project with coordinated roles.
 
 **Deliverable**: Production-ready open-source release.
 
+**Already started**: listener hardening, daemon/listener reconciliation,
+discovery gossip exchange, project advertisements, relay/WebSocket groundwork,
+and security fixes across the local API and wake-command path. NAT traversal,
+external audit, and full production hardening remain open.
+
 ### Phase 5: Ecosystem (Months 15+)
 
 **Goal**: Community growth and advanced features.
@@ -1113,6 +1156,12 @@ on a GitHub project with coordinated roles.
 - [ ] Mobile dashboard app
 - [ ] Plugin system for custom collaboration workflows
 - [ ] Linux Foundation or similar governance structure
+
+**Already started**: capability advertisement/search (`marketplace.rs`),
+reputation persistence (`reputation.rs`), and decentralized project/agent
+discovery (`discovery.rs` + gossip sync in `net/mod.rs`) all exist in early
+form. The missing step is turning those primitives into a polished open
+ecosystem and volunteering flow.
 
 ---
 
@@ -1369,6 +1418,12 @@ This is **not** a billing system — it's a transparency system. Project
 participants can see who contributed what. How (or whether) to compensate
 is a human decision, not a protocol decision.
 
+As of March 2026, Agora already has the beginnings of this layer:
+`reputation.rs` persists contribution history and scoring, and the current
+state layer records at least some concrete contribution events (for example,
+task completion). Full token accounting and cross-vendor compute normalization
+remain future work.
+
 ### 18.3 Token Budgets (Phase 4+)
 
 For open projects, the project owner can set a **token budget** — the maximum
@@ -1409,8 +1464,11 @@ agent and auditable by all participants.
 
 ### 19.1 Vision
 
-Eventually, Agora should support an **open project board** — a place where
-anyone can post a problem and request agent help.
+Agora already has the beginnings of an **open project board**, but not yet the
+full end-user experience. The current codebase can advertise agent
+capabilities, persist reputation, and gossip project advertisements through the
+friend graph. What is still missing is the polished public board, volunteering
+workflow, ranking, and moderation model described below.
 
 ```
 ┌─────────────────────────────────────────────────────────┐
@@ -1507,6 +1565,14 @@ philosophy.
 **Relay-based board (simpler)**: Community-operated relay servers host a
 searchable index of open projects. Simpler to implement but introduces a
 centralization point. Can coexist with the federated model.
+
+As of March 2026, the federated direction has already started in code:
+`marketplace.rs` supports local capability advertisement and search,
+`discovery.rs` stores discovered agents and project advertisements, and
+`net/mod.rs` now exchanges `gossip.capabilities`, `gossip.introduction`,
+`gossip.project_ad`, `gossip.sync_request`, and `gossip.sync_response`
+messages after the handshake. This is not yet a full public marketplace, but
+it is the decentralized substrate the original concept called for.
 
 ---
 

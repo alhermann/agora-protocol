@@ -531,6 +531,9 @@ fn pid_file_path() -> std::path::PathBuf {
 }
 
 fn agora_state_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var("AGORA_HOME") {
+        return PathBuf::from(dir);
+    }
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
     PathBuf::from(home).join(".agora")
 }

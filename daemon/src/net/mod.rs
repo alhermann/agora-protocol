@@ -3,6 +3,7 @@ pub mod ws;
 
 use anyhow::{Context, Result};
 use rustls::pki_types::ServerName;
+use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::{TlsAcceptor, TlsConnector};
@@ -10,6 +11,10 @@ use tracing::{error, info, warn};
 
 use uuid::Uuid;
 
+use crate::discovery::{
+    DiscoveredAgent, DiscoveryPath, Introduction, ProjectAd, SignedCapabilities,
+    compute_transitive_trust,
+};
 use crate::identity::AgentIdentity;
 use crate::protocol::framing::{recv_message, send_message};
 use crate::protocol::message::{Message, MessageType};
@@ -27,6 +32,281 @@ async fn sign_and_send<W: AsyncWrite + Unpin>(
         msg.signature = Some(bs58::encode(&sig).into_string());
     }
     send_message(writer, msg).await
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct GossipSyncRequestPayload {}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct GossipCapabilitiesPayload {
+    capabilities: Vec<SignedCapabilities>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct GossipIntroductionsPayload {
+    introductions: Vec<Introduction>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct GossipSyncResponsePayload {
+    capabilities: Vec<SignedCapabilities>,
+    introductions: Vec<Introduction>,
+    #[serde(default)]
+    project_ads: Vec<ProjectAd>,
+}
+
+fn payload_message<T: Serialize>(
+    from: &str,
+    msg_type: MessageType,
+    payload: &T,
+) -> Result<Message> {
+    let mut msg = Message::text(
+        from,
+        &serde_json::to_string(payload).context("failed to serialize gossip payload")?,
+    );
+    msg.msg_type = msg_type;
+    Ok(msg)
+}
+
+async fn collect_local_signed_capabilities(state: &DaemonState) -> Vec<SignedCapabilities> {
+    let our_did = state.did().to_string();
+    let our_name = state.node_name().to_string();
+    state
+        .marketplace_list()
+        .await
+        .into_iter()
+        .filter(|caps| {
+            caps.agent_name == our_name || caps.agent_did.as_deref() == Some(our_did.as_str())
+        })
+        .map(|caps| SignedCapabilities::sign(&caps, state.identity()))
+        .collect()
+}
+
+async fn collect_friend_introductions(state: &DaemonState, peer_name: &str) -> Vec<Introduction> {
+    let introducer_did = state.did().to_string();
+    let mut introductions = Vec::new();
+
+    for friend in state.get_friends().await {
+        let Some(agent_did) = friend.did.clone() else {
+            continue;
+        };
+        if friend.name == peer_name || friend.trust_level.0 < 2 {
+            continue;
+        }
+
+        let signed_capabilities = state
+            .discovery_get(&agent_did)
+            .await
+            .and_then(|agent| agent.signed_capabilities);
+
+        introductions.push(Introduction {
+            agent_did,
+            agent_name: friend.name,
+            signed_capabilities,
+            introducer_trust: friend.trust_level.0,
+            introducer_did: introducer_did.clone(),
+            last_address: friend.last_address,
+            owner_did: friend.owner_did,
+        });
+    }
+
+    introductions
+}
+
+async fn send_initial_gossip_exchange<W: AsyncWrite + Unpin>(
+    writer: &mut W,
+    state: &DaemonState,
+    node_name: &str,
+    peer_name: &str,
+) -> Result<()> {
+    let capabilities = collect_local_signed_capabilities(state).await;
+    if !capabilities.is_empty() {
+        let payload = GossipCapabilitiesPayload { capabilities };
+        let mut msg = payload_message(node_name, MessageType::GossipCapabilities, &payload)?;
+        sign_and_send(writer, &mut msg, state.identity()).await?;
+    }
+
+    let introductions = collect_friend_introductions(state, peer_name).await;
+    if !introductions.is_empty() {
+        let payload = GossipIntroductionsPayload { introductions };
+        let mut msg = payload_message(node_name, MessageType::GossipIntroduction, &payload)?;
+        sign_and_send(writer, &mut msg, state.identity()).await?;
+    }
+
+    Ok(())
+}
+
+async fn send_gossip_sync_response<W: AsyncWrite + Unpin>(
+    writer: &mut W,
+    state: &DaemonState,
+    node_name: &str,
+    peer_name: &str,
+) -> Result<()> {
+    let payload = GossipSyncResponsePayload {
+        capabilities: collect_local_signed_capabilities(state).await,
+        introductions: collect_friend_introductions(state, peer_name).await,
+        project_ads: state.discovery_project_ads().await,
+    };
+    let mut msg = payload_message(node_name, MessageType::GossipSyncResponse, &payload)?;
+    sign_and_send(writer, &mut msg, state.identity()).await?;
+    Ok(())
+}
+
+async fn upsert_direct_peer_discovery(
+    state: &DaemonState,
+    peer_name: &str,
+    peer_did: &str,
+    peer_owner_did: Option<&String>,
+    peer_addr: &str,
+) {
+    let existing = state.discovery_get(peer_did).await;
+    let now = chrono::Utc::now();
+    let agent = DiscoveredAgent {
+        did: peer_did.to_string(),
+        name: peer_name.to_string(),
+        capabilities: existing
+            .as_ref()
+            .and_then(|agent| agent.capabilities.clone()),
+        discovery_path: DiscoveryPath::Direct,
+        effective_trust: state.get_trust_level(peer_name).await.0.min(2) as f64,
+        signed_capabilities: existing
+            .as_ref()
+            .and_then(|agent| agent.signed_capabilities.clone()),
+        first_seen: existing
+            .as_ref()
+            .map(|agent| agent.first_seen)
+            .unwrap_or(now),
+        last_refreshed: now,
+        last_address: Some(peer_addr.to_string()),
+        owner_did: peer_owner_did
+            .cloned()
+            .or_else(|| existing.and_then(|agent| agent.owner_did)),
+    };
+    state.discovery_upsert(agent).await;
+}
+
+async fn merge_gossip_capability(
+    state: &DaemonState,
+    peer_name: &str,
+    peer_did: Option<&str>,
+    peer_addr: &str,
+    caps: SignedCapabilities,
+) {
+    if caps.did == state.did() {
+        return;
+    }
+    if !caps.verify() {
+        warn!(
+            "Invalid gossip.capabilities entry for {} relayed by {} — ignoring",
+            caps.capabilities.agent_name, peer_name
+        );
+        return;
+    }
+
+    let existing = state.discovery_get(&caps.did).await;
+    let now = chrono::Utc::now();
+    let relay_trust = state.get_trust_level(peer_name).await.0;
+    let is_direct = caps.hop_count == 0 && peer_did == Some(caps.did.as_str());
+    let agent = DiscoveredAgent {
+        did: caps.did.clone(),
+        name: caps.capabilities.agent_name.clone(),
+        capabilities: Some(caps.capabilities.clone()),
+        discovery_path: if is_direct {
+            DiscoveryPath::Direct
+        } else {
+            DiscoveryPath::Gossip {
+                hop_count: caps.hop_count.max(1),
+                relay_name: peer_name.to_string(),
+            }
+        },
+        effective_trust: if is_direct {
+            relay_trust.min(2) as f64
+        } else {
+            compute_transitive_trust(relay_trust, 4, caps.hop_count.max(1))
+        },
+        signed_capabilities: Some(caps.clone()),
+        first_seen: existing
+            .as_ref()
+            .map(|agent| agent.first_seen)
+            .unwrap_or(now),
+        last_refreshed: now,
+        last_address: if is_direct {
+            Some(peer_addr.to_string())
+        } else {
+            existing
+                .as_ref()
+                .and_then(|agent| agent.last_address.clone())
+                .or_else(|| caps.capabilities.address.clone())
+        },
+        owner_did: existing.as_ref().and_then(|agent| agent.owner_did.clone()),
+    };
+    state.discovery_upsert(agent).await;
+}
+
+async fn merge_gossip_introduction(state: &DaemonState, peer_name: &str, intro: Introduction) {
+    if intro.agent_did == state.did() {
+        return;
+    }
+
+    let our_trust_of_introducer = state.get_trust_level(peer_name).await.0;
+    let effective_trust =
+        compute_transitive_trust(our_trust_of_introducer, intro.introducer_trust, 1);
+    if effective_trust <= 0.0 {
+        return;
+    }
+
+    let existing = state.discovery_get(&intro.agent_did).await;
+    let now = chrono::Utc::now();
+    let verified_signed = intro.signed_capabilities.as_ref().and_then(|caps| {
+        if caps.verify() {
+            Some(caps.clone())
+        } else {
+            warn!(
+                "Invalid signed capabilities in introduction for {} from {} — dropping capabilities",
+                intro.agent_name, peer_name
+            );
+            None
+        }
+    });
+
+    let agent = DiscoveredAgent {
+        did: intro.agent_did.clone(),
+        name: intro.agent_name.clone(),
+        capabilities: verified_signed
+            .as_ref()
+            .map(|caps| caps.capabilities.clone())
+            .or_else(|| {
+                existing
+                    .as_ref()
+                    .and_then(|agent| agent.capabilities.clone())
+            }),
+        discovery_path: DiscoveryPath::Introduction {
+            introducer_did: intro.introducer_did.clone(),
+            introducer_name: peer_name.to_string(),
+            introducer_trust: intro.introducer_trust,
+        },
+        effective_trust,
+        signed_capabilities: verified_signed.or_else(|| {
+            existing
+                .as_ref()
+                .and_then(|agent| agent.signed_capabilities.clone())
+        }),
+        first_seen: existing
+            .as_ref()
+            .map(|agent| agent.first_seen)
+            .unwrap_or(now),
+        last_refreshed: now,
+        last_address: intro.last_address.clone().or_else(|| {
+            existing
+                .as_ref()
+                .and_then(|agent| agent.last_address.clone())
+        }),
+        owner_did: intro
+            .owner_did
+            .clone()
+            .or_else(|| existing.as_ref().and_then(|agent| agent.owner_did.clone())),
+    };
+    state.discovery_upsert(agent).await;
 }
 
 /// Start the Agora daemon: listen for incoming TLS connections.
@@ -416,6 +696,11 @@ where
 
     info!("Peer registered: {} ({})", peer_name, peer_addr);
 
+    if let Some(ref did) = peer_did {
+        upsert_direct_peer_discovery(state, &peer_name, did, peer_owner_did.as_ref(), peer_addr)
+            .await;
+    }
+
     // Replay queued offline messages for this peer
     {
         let pending = state.outbox_pending_for(&peer_name).await;
@@ -463,6 +748,8 @@ where
             info!("Re-sent pending friend request to {}", peer_name);
         }
     }
+
+    send_initial_gossip_exchange(&mut writer, state, &node_name, &peer_name).await?;
 
     // Subscribe to outbox broadcast — this peer gets its own copy of every message
     let mut outbox_rx = state.subscribe_outbox();
@@ -1129,6 +1416,75 @@ where
                                             }
                                         }
                                         state.push_inbox(msg).await;
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            _ if msg.msg_type.is_gossip() => {
+                                match msg.msg_type {
+                                    MessageType::GossipCapabilities => {
+                                        if let Some(payload) =
+                                            msg.parse_payload::<GossipCapabilitiesPayload>()
+                                        {
+                                            for caps in payload.capabilities {
+                                                merge_gossip_capability(
+                                                    state,
+                                                    &msg.from,
+                                                    peer_did.as_deref(),
+                                                    peer_addr,
+                                                    caps,
+                                                )
+                                                .await;
+                                            }
+                                        }
+                                    }
+                                    MessageType::GossipIntroduction => {
+                                        if let Some(payload) =
+                                            msg.parse_payload::<GossipIntroductionsPayload>()
+                                        {
+                                            for intro in payload.introductions {
+                                                merge_gossip_introduction(state, &msg.from, intro)
+                                                    .await;
+                                            }
+                                        }
+                                    }
+                                    MessageType::GossipProjectAd => {
+                                        if let Some(payload) = msg.parse_payload::<ProjectAd>() {
+                                            state.discovery_upsert_project_ad(payload).await;
+                                        }
+                                    }
+                                    MessageType::GossipSyncRequest => {
+                                        let _ = msg.parse_payload::<GossipSyncRequestPayload>();
+                                        send_gossip_sync_response(
+                                            &mut writer,
+                                            state,
+                                            &node_name,
+                                            &peer_name,
+                                        )
+                                        .await?;
+                                    }
+                                    MessageType::GossipSyncResponse => {
+                                        if let Some(payload) =
+                                            msg.parse_payload::<GossipSyncResponsePayload>()
+                                        {
+                                            for caps in payload.capabilities {
+                                                merge_gossip_capability(
+                                                    state,
+                                                    &msg.from,
+                                                    peer_did.as_deref(),
+                                                    peer_addr,
+                                                    caps,
+                                                )
+                                                .await;
+                                            }
+                                            for intro in payload.introductions {
+                                                merge_gossip_introduction(state, &msg.from, intro)
+                                                    .await;
+                                            }
+                                            for ad in payload.project_ads {
+                                                state.discovery_upsert_project_ad(ad).await;
+                                            }
+                                        }
                                     }
                                     _ => {}
                                 }
