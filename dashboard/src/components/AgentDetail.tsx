@@ -1,6 +1,7 @@
 import { useCallback, useState } from 'react';
 import { usePolling } from '../hooks/usePolling';
-import { getPeers, getFriends, getConversations, getProjects, listConsumers, updateFriend, removeFriend, sendFriendRequest, disconnectPeer } from '../api';
+import { getPeers, getFriends, getConversations, getProjects, listConsumers, updateFriend, removeFriend, sendFriendRequest, disconnectPeer, getMarketplaceAgents, getDiscoveryAgent } from '../api';
+import type { MarketplaceAgent, DiscoveredAgent } from '../api';
 import { TrustShield } from './TrustShield';
 import type {
   PeersResponse, FriendsResponse, ConversationsResponse, ProjectsResponse, ConsumersResponse,
@@ -30,6 +31,9 @@ export function AgentDetail({
   const { data: projectsData } = usePolling<ProjectsResponse>(fetchProjects, 10000);
   const fetchConsumers = useCallback(() => listConsumers(), []);
   const { data: consumersData } = usePolling<ConsumersResponse>(fetchConsumers, 10000);
+  const { data: marketplace } = usePolling<MarketplaceAgent[]>(useCallback(() => getMarketplaceAgents(), []), 10000);
+
+  const agentCaps = marketplace?.find(a => a.agent_name === name);
 
   const [removing, setRemoving] = useState(false);
   const [confirmRemove, setConfirmRemove] = useState(false);
@@ -239,6 +243,43 @@ export function AgentDetail({
           </div>
         )}
       </div>
+
+      {/* Capabilities from marketplace */}
+      {agentCaps && (agentCaps.domains.length > 0 || agentCaps.tools.length > 0) && (
+        <div className="detail-section">
+          <h3 className="detail-section-heading">Capabilities</h3>
+          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+            {agentCaps.domains.map(d => (
+              <span key={d} style={{
+                fontSize: 12, background: 'rgba(52,208,88,0.1)', color: 'var(--green)',
+                padding: '4px 10px', borderRadius: 10,
+              }}>{d}</span>
+            ))}
+            {agentCaps.tools.map(t => (
+              <span key={t} style={{
+                fontSize: 12, background: 'rgba(124,106,239,0.1)', color: 'var(--accent)',
+                padding: '4px 10px', borderRadius: 10,
+              }}>{t}</span>
+            ))}
+          </div>
+          <div style={{ fontSize: 12, color: 'var(--text-dim)', marginTop: 8 }}>
+            Availability: {agentCaps.availability}
+          </div>
+        </div>
+      )}
+
+      {/* Mutual trust indicator */}
+      {friend && (
+        <div className="detail-section">
+          <h3 className="detail-section-heading">Trust Relationship</h3>
+          <div style={{ fontSize: 13, color: 'var(--text)' }}>
+            <div>You trust {name}: <strong>{trustLabels[friend.trust_level]}</strong> ({friend.trust_level})</div>
+            {friend.their_trust !== undefined && friend.their_trust !== null && (
+              <div>{name} trusts you: <strong>{trustLabels[friend.their_trust] || 'Unknown'}</strong> ({friend.their_trust})</div>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Remove friend */}
       {friend && friend.trust_level > 0 && (

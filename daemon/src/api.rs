@@ -136,6 +136,12 @@ fn api_routes() -> Router<DaemonState> {
         .route("/marketplace/search", get(marketplace_search))
         .route("/marketplace/advertise", post(marketplace_advertise))
         .route("/marketplace/agents", get(marketplace_list))
+        // Discovery (gossip network)
+        .route("/discovery/agents", get(discovery_list_agents))
+        .route("/discovery/search", get(discovery_search))
+        .route("/discovery/agent/{did}", get(discovery_get_agent))
+        .route("/discovery/projects", get(discovery_list_project_ads))
+        .route("/discovery/stats", get(discovery_stats))
         // Reputation
         .route("/friends/{name}/reputation", get(get_reputation))
         .route("/reputation/leaderboard", get(reputation_leaderboard))
@@ -3345,6 +3351,111 @@ async fn marketplace_list(
     State(state): State<DaemonState>,
 ) -> Json<Vec<crate::marketplace::AgentCapabilities>> {
     Json(state.marketplace_list().await)
+}
+
+// ---------------------------------------------------------------------------
+// Discovery endpoints (gossip network)
+// ---------------------------------------------------------------------------
+
+/// GET /discovery/agents — list all agents discovered via gossip
+async fn discovery_list_agents(State(state): State<DaemonState>) -> Json<serde_json::Value> {
+    let agents = state.discovery_list().await;
+    let friends = state.get_friends().await;
+    let friend_names: std::collections::HashSet<String> =
+        friends.iter().map(|f| f.name.clone()).collect();
+
+    let entries: Vec<serde_json::Value> = agents
+        .iter()
+        .map(|a| {
+            let trust_level = crate::discovery::trust_score_to_level(a.effective_trust);
+            serde_json::json!({
+                "did": a.did,
+                "name": a.name,
+                "domains": a.capabilities.as_ref().map(|c| &c.domains).cloned().unwrap_or_default(),
+                "tools": a.capabilities.as_ref().map(|c| &c.tools).cloned().unwrap_or_default(),
+                "availability": a.capabilities.as_ref().map(|c| match c.availability {
+                    crate::marketplace::AgentAvailability::Available => "available",
+                    crate::marketplace::AgentAvailability::Busy => "busy",
+                    crate::marketplace::AgentAvailability::Offline => "offline",
+                }).unwrap_or("unknown"),
+                "description": a.capabilities.as_ref().and_then(|c| c.description.clone()),
+                "effective_trust": a.effective_trust,
+                "trust_level": trust_level,
+                "trust_level_name": crate::discovery::trust_level_name(trust_level),
+                "discovery_method": match &a.discovery_path {
+                    crate::discovery::DiscoveryPath::Direct => "direct",
+                    crate::discovery::DiscoveryPath::Introduction { .. } => "introduction",
+                    crate::discovery::DiscoveryPath::Gossip { .. } => "gossip",
+                },
+                "is_friend": friend_names.contains(&a.name),
+                "verified": a.signed_capabilities.as_ref().map(|s| s.verify()).unwrap_or(false),
+                "first_seen": a.first_seen.to_rfc3339(),
+                "last_refreshed": a.last_refreshed.to_rfc3339(),
+                "last_address": a.last_address,
+                "owner_did": a.owner_did,
+            })
+        })
+        .collect();
+
+    Json(serde_json::json!({ "count": entries.len(), "agents": entries }))
+}
+
+/// GET /discovery/search?query=...
+async fn discovery_search(
+    State(state): State<DaemonState>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Json<serde_json::Value> {
+    let query = params.get("query").cloned().unwrap_or_default();
+    let agents = state.discovery_search(&query).await;
+    let entries: Vec<serde_json::Value> = agents
+        .iter()
+        .map(|a| {
+            serde_json::json!({
+                "did": a.did,
+                "name": a.name,
+                "domains": a.capabilities.as_ref().map(|c| &c.domains).cloned().unwrap_or_default(),
+                "tools": a.capabilities.as_ref().map(|c| &c.tools).cloned().unwrap_or_default(),
+                "effective_trust": a.effective_trust,
+                "trust_level": crate::discovery::trust_score_to_level(a.effective_trust),
+            })
+        })
+        .collect();
+    Json(serde_json::json!({ "count": entries.len(), "results": entries }))
+}
+
+/// GET /discovery/agent/{did}
+async fn discovery_get_agent(
+    State(state): State<DaemonState>,
+    Path(did): Path<String>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    match state.discovery_get(&did).await {
+        Some(a) => Ok(Json(serde_json::json!({
+            "did": a.did,
+            "name": a.name,
+            "capabilities": a.capabilities,
+            "discovery_path": a.discovery_path,
+            "effective_trust": a.effective_trust,
+            "verified": a.signed_capabilities.as_ref().map(|s| s.verify()).unwrap_or(false),
+            "first_seen": a.first_seen.to_rfc3339(),
+            "last_refreshed": a.last_refreshed.to_rfc3339(),
+            "last_address": a.last_address,
+            "owner_did": a.owner_did,
+        }))),
+        None => Err(StatusCode::NOT_FOUND),
+    }
+}
+
+/// GET /discovery/projects — list project advertisements
+async fn discovery_list_project_ads(State(state): State<DaemonState>) -> Json<serde_json::Value> {
+    let ads = state.discovery_project_ads().await;
+    Json(serde_json::json!({ "count": ads.len(), "projects": ads }))
+}
+
+/// GET /discovery/stats
+async fn discovery_stats(
+    State(state): State<DaemonState>,
+) -> Json<crate::discovery::DiscoveryStats> {
+    Json(state.discovery_stats().await)
 }
 
 // ---------------------------------------------------------------------------

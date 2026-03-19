@@ -7,6 +7,7 @@ pub mod config;
 pub mod coordinator;
 pub mod crypto;
 pub mod dashboard;
+pub mod discovery;
 pub mod format;
 pub mod github;
 pub mod identity;

@@ -6,6 +6,7 @@ import { FriendRequests } from './FriendRequests';
 import { ProjectsOverview } from './ProjectsOverview';
 import { AgentsOverview } from './AgentsOverview';
 import { MessagesOverview } from './MessagesOverview';
+import { NetworkOverview } from './NetworkOverview';
 import ProjectDetail from './ProjectDetail';
 
 export function MainContent({
@@ -30,6 +31,8 @@ export function MainContent({
       return <AgentsOverview onSelect={onSelect} />;
     case 'messages':
       return <MessagesOverview onSelect={onSelect} />;
+    case 'network':
+      return <NetworkOverview onSelect={onSelect} />;
     case 'project':
       return <ProjectDetail projectId={view.id} onBack={() => onSelect({ type: 'projects' })} onSelect={onSelect} />;
     case 'welcome':

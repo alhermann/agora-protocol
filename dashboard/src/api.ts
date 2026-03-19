@@ -254,3 +254,88 @@ export const githubSync = (projectId: string) =>
 export const getGitHubStatus = (projectId: string) =>
   get<GitHubStatusResponse>(`/projects/${encodeURIComponent(projectId)}/github/status`)
     .catch(() => ({ has_token: false, repo_url: null, parsed_repo: null, github_linked_tasks: 0, local_only_tasks: 0 }));
+
+// --- Marketplace (agent discovery) ---
+
+export interface MarketplaceAgent {
+  agent_name: string;
+  agent_did?: string;
+  domains: string[];
+  tools: string[];
+  availability: 'available' | 'busy' | 'offline';
+  description?: string;
+  updated_at: string;
+  address?: string;
+}
+
+export interface MarketplaceSearchResult {
+  agent: MarketplaceAgent;
+  score: number;
+}
+
+export const getMarketplaceAgents = () =>
+  get<MarketplaceAgent[]>('/marketplace/agents');
+
+// --- Discovery (gossip network) ---
+
+export interface DiscoveredAgent {
+  did: string;
+  name: string;
+  domains: string[];
+  tools: string[];
+  availability: string;
+  effective_trust: number;
+  trust_level: number;
+  trust_level_name: string;
+  discovery_method: string;
+  is_friend: boolean;
+  verified: boolean;
+  first_seen: string;
+  last_refreshed: string;
+  last_address?: string;
+  owner_did?: string;
+}
+
+export interface DiscoveryStats {
+  total_discovered: number;
+  direct_connections: number;
+  introductions: number;
+  gossip_relayed: number;
+  project_ads: number;
+  avg_effective_trust: number;
+  network_reach: number;
+}
+
+export interface ProjectAd {
+  project_id: string;
+  project_name: string;
+  description?: string;
+  repo?: string;
+  owner_name: string;
+  open_roles: Array<{ role: string; desired_domains: string[]; desired_tools: string[]; description?: string }>;
+  created_at: string;
+}
+
+export const getDiscoveryAgents = () =>
+  get<{ count: number; agents: DiscoveredAgent[] }>('/discovery/agents');
+
+export const searchDiscovery = (query: string) =>
+  get<{ count: number; results: DiscoveredAgent[] }>(`/discovery/search?query=${encodeURIComponent(query)}`);
+
+export const getDiscoveryAgent = (did: string) =>
+  get<DiscoveredAgent>(`/discovery/agent/${encodeURIComponent(did)}`);
+
+export const getDiscoveryProjects = () =>
+  get<{ count: number; projects: ProjectAd[] }>('/discovery/projects');
+
+export const getDiscoveryStats = () =>
+  get<DiscoveryStats>('/discovery/stats');
+
+export const searchMarketplace = (params: { domains?: string[]; tools?: string[]; query?: string }) => {
+  const parts: string[] = [];
+  if (params.domains) parts.push(`domains=${params.domains.join(',')}`);
+  if (params.tools) parts.push(`tools=${params.tools.join(',')}`);
+  if (params.query) parts.push(`query=${encodeURIComponent(params.query)}`);
+  const qs = parts.length > 0 ? `?${parts.join('&')}` : '';
+  return get<{ results: MarketplaceSearchResult[] }>(`/marketplace/search${qs}`);
+};

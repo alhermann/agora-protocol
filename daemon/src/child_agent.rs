@@ -5,10 +5,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::process::Command;
-use tokio::sync::Notify;
+use tokio::sync::{Mutex, Notify};
 use tracing::{info, warn};
 
 const LISTENER_RETRY_DELAY: Duration = Duration::from_secs(2);
+const LISTENER_RECONCILE_INTERVAL: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone)]
 pub struct ListenOptions {
@@ -49,6 +50,13 @@ struct AgentRuntimeConfig {
 #[derive(Debug, Deserialize)]
 struct RegisterConsumerResponse {
     consumer_id: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct StatusResponse {
+    session_id: String,
+    #[serde(default)]
+    wake_listener_labels: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -119,6 +127,12 @@ struct MessageBatch {
     messages: Vec<InboxMessage>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ListenerRegistration {
+    consumer_id: u64,
+    daemon_session_id: String,
+}
+
 #[derive(Default)]
 struct ConversationRouteCache {
     routes: HashMap<String, RoomRoute>,
@@ -152,11 +166,21 @@ pub async fn listen(options: ListenOptions) -> Result<()> {
         options.listener_label, options.send_as, cfg.backend
     );
 
-    let mut listener_id =
-        register_consumer_with_retry(&client, &api_base, &options.listener_label).await?;
+    let registration = Arc::new(Mutex::new(
+        reconcile_listener_registration(&client, &api_base, &options.listener_label, None).await?,
+    ));
     let mut routes = ConversationRouteCache::default();
+    let reconcile_stop = Arc::new(Notify::new());
+    let reconcile_task = tokio::spawn(run_listener_reconcile_loop(
+        client.clone(),
+        api_base.clone(),
+        options.listener_label.clone(),
+        registration.clone(),
+        reconcile_stop.clone(),
+    ));
 
     loop {
+        let listener_id = { registration.lock().await.consumer_id };
         let outcome = tokio::select! {
             _ = tokio::signal::ctrl_c() => {
                 info!("Child-agent listener received Ctrl+C, shutting down");
@@ -170,12 +194,15 @@ pub async fn listen(options: ListenOptions) -> Result<()> {
                             "Child-agent listener consumer {} poll failed: {}. Re-registering listener '{}'",
                             listener_id, err, options.listener_label
                         );
-                        listener_id = register_consumer_with_retry(
+                        let current = { registration.lock().await.clone() };
+                        let refreshed = reconcile_listener_registration(
                             &client,
                             &api_base,
                             &options.listener_label,
+                            Some(&current),
                         )
                         .await?;
+                        *registration.lock().await = refreshed;
                         continue;
                     }
                 }
@@ -189,9 +216,15 @@ pub async fn listen(options: ListenOptions) -> Result<()> {
                     "Child-agent listener consumer {} was reaped, registering again",
                     listener_id
                 );
-                listener_id =
-                    register_consumer_with_retry(&client, &api_base, &options.listener_label)
-                        .await?;
+                let current = { registration.lock().await.clone() };
+                let refreshed = reconcile_listener_registration(
+                    &client,
+                    &api_base,
+                    &options.listener_label,
+                    Some(&current),
+                )
+                .await?;
+                *registration.lock().await = refreshed;
                 continue;
             }
         };
@@ -219,7 +252,8 @@ pub async fn listen(options: ListenOptions) -> Result<()> {
             let heartbeat_task = tokio::spawn(run_processing_heartbeat(
                 client.clone(),
                 api_base.clone(),
-                listener_id,
+                options.listener_label.clone(),
+                registration.clone(),
                 heartbeat_stop.clone(),
             ));
 
@@ -272,6 +306,10 @@ pub async fn listen(options: ListenOptions) -> Result<()> {
         }
     }
 
+    reconcile_stop.notify_waiters();
+    let _ = reconcile_task.await;
+
+    let listener_id = { registration.lock().await.consumer_id };
     if let Err(err) = unregister_consumer(&client, &api_base, listener_id).await {
         warn!(
             "Failed to unregister child-agent listener consumer {}: {}",
@@ -313,6 +351,111 @@ async fn register_consumer_with_retry_and_delay(
                     retry_delay.as_secs()
                 );
                 tokio::time::sleep(retry_delay).await;
+            }
+        }
+    }
+}
+
+async fn fetch_status(client: &reqwest::Client, api_base: &str) -> Result<StatusResponse> {
+    client
+        .get(format!("{}/status", api_base))
+        .send()
+        .await
+        .context("failed to fetch daemon status")?
+        .error_for_status()
+        .context("daemon status request failed")?
+        .json::<StatusResponse>()
+        .await
+        .context("failed to decode daemon status")
+}
+
+async fn fetch_status_with_retry(
+    client: &reqwest::Client,
+    api_base: &str,
+) -> Result<StatusResponse> {
+    fetch_status_with_retry_and_delay(client, api_base, LISTENER_RETRY_DELAY).await
+}
+
+async fn fetch_status_with_retry_and_delay(
+    client: &reqwest::Client,
+    api_base: &str,
+    retry_delay: Duration,
+) -> Result<StatusResponse> {
+    loop {
+        match fetch_status(client, api_base).await {
+            Ok(status) => return Ok(status),
+            Err(err) => {
+                warn!(
+                    "Failed to fetch daemon status for child-agent listener: {}. Retrying in {}s",
+                    err,
+                    retry_delay.as_secs()
+                );
+                tokio::time::sleep(retry_delay).await;
+            }
+        }
+    }
+}
+
+async fn reconcile_listener_registration(
+    client: &reqwest::Client,
+    api_base: &str,
+    label: &str,
+    current: Option<&ListenerRegistration>,
+) -> Result<ListenerRegistration> {
+    let status = fetch_status_with_retry(client, api_base).await?;
+    let label_active = status
+        .wake_listener_labels
+        .iter()
+        .any(|existing| existing == label);
+
+    if let Some(current) = current {
+        if current.daemon_session_id == status.session_id && label_active {
+            return Ok(current.clone());
+        }
+    }
+
+    let consumer_id = register_consumer_with_retry(client, api_base, label).await?;
+    let status = fetch_status_with_retry(client, api_base).await?;
+    Ok(ListenerRegistration {
+        consumer_id,
+        daemon_session_id: status.session_id,
+    })
+}
+
+async fn run_listener_reconcile_loop(
+    client: reqwest::Client,
+    api_base: String,
+    label: String,
+    registration: Arc<Mutex<ListenerRegistration>>,
+    stop: Arc<Notify>,
+) {
+    let mut interval = tokio::time::interval(LISTENER_RECONCILE_INTERVAL);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            _ = stop.notified() => break,
+            _ = interval.tick() => {
+                let current = { registration.lock().await.clone() };
+                match reconcile_listener_registration(&client, &api_base, &label, Some(&current)).await {
+                    Ok(updated) if updated != current => {
+                        info!(
+                            "Child-agent listener '{}' reconciled registration: consumer {} -> {}, session {} -> {}",
+                            label,
+                            current.consumer_id,
+                            updated.consumer_id,
+                            current.daemon_session_id,
+                            updated.daemon_session_id
+                        );
+                        *registration.lock().await = updated;
+                    }
+                    Ok(_) => {}
+                    Err(err) => {
+                        warn!(
+                            "Child-agent listener '{}' reconciliation failed: {}",
+                            label, err
+                        );
+                    }
+                }
             }
         }
     }
@@ -842,7 +985,8 @@ async fn touch_consumer(client: &reqwest::Client, api_base: &str, consumer_id: u
 async fn run_processing_heartbeat(
     client: reqwest::Client,
     api_base: String,
-    consumer_id: u64,
+    label: String,
+    registration: Arc<Mutex<ListenerRegistration>>,
     stop: Arc<Notify>,
 ) {
     let mut interval = tokio::time::interval(Duration::from_secs(15));
@@ -851,8 +995,30 @@ async fn run_processing_heartbeat(
         tokio::select! {
             _ = stop.notified() => break,
             _ = interval.tick() => {
-                if let Err(err) = touch_consumer(&client, &api_base, consumer_id).await {
-                    warn!("Failed to heartbeat consumer {} during backend processing: {}", consumer_id, err);
+                let current = { registration.lock().await.clone() };
+                if let Err(err) = touch_consumer(&client, &api_base, current.consumer_id).await {
+                    warn!(
+                        "Failed to heartbeat consumer {} during backend processing: {}",
+                        current.consumer_id,
+                        err
+                    );
+                    continue;
+                }
+                match reconcile_listener_registration(&client, &api_base, &label, Some(&current)).await {
+                    Ok(updated) if updated != current => {
+                        info!(
+                            "Child-agent listener '{}' refreshed registration during backend processing: consumer {} -> {}",
+                            label, current.consumer_id, updated.consumer_id
+                        );
+                        *registration.lock().await = updated;
+                    }
+                    Ok(_) => {}
+                    Err(err) => {
+                        warn!(
+                            "Failed to reconcile listener '{}' during backend processing: {}",
+                            label, err
+                        );
+                    }
                 }
             }
         }
@@ -896,7 +1062,12 @@ async fn send_room_reply(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::{Json, Router, extract::State, http::StatusCode, routing::post};
+    use axum::{
+        Json, Router,
+        extract::State,
+        http::StatusCode,
+        routing::{get, post},
+    };
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn inbox(id: &str, from: &str, conversation_id: Option<&str>, body: &str) -> InboxMessage {
@@ -960,6 +1131,51 @@ mod tests {
         attempts: Arc<AtomicUsize>,
     }
 
+    #[derive(Clone)]
+    struct StatusRetryTestState {
+        attempts: Arc<AtomicUsize>,
+    }
+
+    #[derive(Clone)]
+    struct ReconcileTestState {
+        session_id: Arc<std::sync::Mutex<String>>,
+        active_labels: Arc<std::sync::Mutex<Vec<String>>>,
+        register_count: Arc<AtomicUsize>,
+        next_consumer_id: Arc<AtomicUsize>,
+    }
+
+    async fn status_handler(State(state): State<ReconcileTestState>) -> Json<serde_json::Value> {
+        Json(serde_json::json!({
+            "session_id": state.session_id.lock().unwrap().clone(),
+            "wake_listener_labels": state.active_labels.lock().unwrap().clone(),
+        }))
+    }
+
+    async fn register_listener_handler(
+        State(state): State<ReconcileTestState>,
+    ) -> Json<serde_json::Value> {
+        state.register_count.fetch_add(1, Ordering::SeqCst);
+        let consumer_id = state.next_consumer_id.fetch_add(1, Ordering::SeqCst) as u64;
+        let mut active_labels = state.active_labels.lock().unwrap();
+        if !active_labels.iter().any(|label| label == "codex-listener") {
+            active_labels.push("codex-listener".to_string());
+        }
+        Json(serde_json::json!({ "consumer_id": consumer_id }))
+    }
+
+    async fn flaky_status_handler(
+        State(state): State<StatusRetryTestState>,
+    ) -> Result<Json<serde_json::Value>, StatusCode> {
+        let attempt = state.attempts.fetch_add(1, Ordering::SeqCst);
+        if attempt == 0 {
+            return Err(StatusCode::SERVICE_UNAVAILABLE);
+        }
+        Ok(Json(serde_json::json!({
+            "session_id": "session-1",
+            "wake_listener_labels": ["codex-listener"],
+        })))
+    }
+
     async fn flaky_register_handler(
         State(state): State<RegisterTestState>,
     ) -> Result<Json<serde_json::Value>, StatusCode> {
@@ -995,6 +1211,114 @@ mod tests {
         .unwrap();
 
         assert_eq!(consumer_id, 42);
+        assert!(state.attempts.load(Ordering::SeqCst) >= 2);
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn reconcile_listener_registration_keeps_existing_when_session_matches() {
+        let state = ReconcileTestState {
+            session_id: Arc::new(std::sync::Mutex::new("session-1".to_string())),
+            active_labels: Arc::new(std::sync::Mutex::new(vec!["codex-listener".to_string()])),
+            register_count: Arc::new(AtomicUsize::new(0)),
+            next_consumer_id: Arc::new(AtomicUsize::new(100)),
+        };
+        let app = Router::new()
+            .route("/status", get(status_handler))
+            .route("/consumers", post(register_listener_handler))
+            .with_state(state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let client = reqwest::Client::new();
+        let current = ListenerRegistration {
+            consumer_id: 42,
+            daemon_session_id: "session-1".to_string(),
+        };
+
+        let reconciled = reconcile_listener_registration(
+            &client,
+            &format!("http://{}", addr),
+            "codex-listener",
+            Some(&current),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(reconciled, current);
+        assert_eq!(state.register_count.load(Ordering::SeqCst), 0);
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn reconcile_listener_registration_reregisters_after_session_change() {
+        let state = ReconcileTestState {
+            session_id: Arc::new(std::sync::Mutex::new("session-2".to_string())),
+            active_labels: Arc::new(std::sync::Mutex::new(Vec::new())),
+            register_count: Arc::new(AtomicUsize::new(0)),
+            next_consumer_id: Arc::new(AtomicUsize::new(100)),
+        };
+        let app = Router::new()
+            .route("/status", get(status_handler))
+            .route("/consumers", post(register_listener_handler))
+            .with_state(state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let client = reqwest::Client::new();
+        let current = ListenerRegistration {
+            consumer_id: 7,
+            daemon_session_id: "session-1".to_string(),
+        };
+
+        let reconciled = reconcile_listener_registration(
+            &client,
+            &format!("http://{}", addr),
+            "codex-listener",
+            Some(&current),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(reconciled.consumer_id, 100);
+        assert_eq!(reconciled.daemon_session_id, "session-2");
+        assert_eq!(state.register_count.load(Ordering::SeqCst), 1);
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn fetch_status_with_retry_retries_after_transient_failure() {
+        let state = StatusRetryTestState {
+            attempts: Arc::new(AtomicUsize::new(0)),
+        };
+        let app = Router::new()
+            .route("/status", get(flaky_status_handler))
+            .with_state(state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let client = reqwest::Client::new();
+        let status = fetch_status_with_retry_and_delay(
+            &client,
+            &format!("http://{}", addr),
+            Duration::from_millis(10),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(status.session_id, "session-1");
         assert!(state.attempts.load(Ordering::SeqCst) >= 2);
 
         server.abort();

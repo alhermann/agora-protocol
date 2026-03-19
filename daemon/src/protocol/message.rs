@@ -177,6 +177,23 @@ pub enum MessageType {
     #[serde(rename = "coordinator.suggestion")]
     CoordinatorSuggestion,
 
+    // --- Gossip / Discovery types ---
+    /// Exchange signed capability entries with a peer
+    #[serde(rename = "gossip.capabilities")]
+    GossipCapabilities,
+    /// Friend-of-friend introduction
+    #[serde(rename = "gossip.introduction")]
+    GossipIntroduction,
+    /// Advertise a project's open roles to the network
+    #[serde(rename = "gossip.project_ad")]
+    GossipProjectAd,
+    /// Request discovery sync from a peer
+    #[serde(rename = "gossip.sync_request")]
+    GossipSyncRequest,
+    /// Response to a discovery sync request
+    #[serde(rename = "gossip.sync_response")]
+    GossipSyncResponse,
+
     /// Forward compatibility — older peers ignore unknown message types.
     #[serde(other)]
     Unknown,
@@ -228,6 +245,18 @@ impl MessageType {
                 | MessageType::FriendAccept
                 | MessageType::FriendReject
                 | MessageType::FriendRevoke
+        )
+    }
+
+    /// Whether this is a gossip/discovery message type.
+    pub fn is_gossip(&self) -> bool {
+        matches!(
+            self,
+            MessageType::GossipCapabilities
+                | MessageType::GossipIntroduction
+                | MessageType::GossipProjectAd
+                | MessageType::GossipSyncRequest
+                | MessageType::GossipSyncResponse
         )
     }
 }

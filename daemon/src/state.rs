@@ -768,6 +768,8 @@ struct Inner {
     outbox_store: Mutex<crate::outbox::OutboxStore>,
     /// Agent marketplace for capability-based discovery.
     marketplace: Mutex<crate::marketplace::MarketplaceStore>,
+    /// Gossip-based network discovery store.
+    discovery: Mutex<crate::discovery::DiscoveryStore>,
     /// Reputation tracking for agent contributions.
     reputation: Mutex<crate::reputation::ReputationStore>,
     /// Coordinator suggestions per project.
@@ -942,6 +944,9 @@ impl DaemonState {
                 project_invitations: Mutex::new(project_invitations),
                 outbox_store: Mutex::new(crate::outbox::OutboxStore::new(
                     &crate::outbox::OutboxStore::default_path(),
+                )),
+                discovery: Mutex::new(crate::discovery::DiscoveryStore::load(
+                    &crate::discovery::DiscoveryStore::default_path(),
                 )),
                 marketplace: Mutex::new(crate::marketplace::MarketplaceStore::load(
                     &crate::marketplace::MarketplaceStore::default_path(),
@@ -2655,10 +2660,18 @@ impl DaemonState {
     }
 
     /// Auto-advertise agent in marketplace based on project roles.
+    /// Skips if agent already has a richer manually-set profile.
     async fn auto_advertise_agent(&self, agent_name: &str) {
         // Skip internal consumers
         if agent_name == "http-default" || agent_name.ends_with("-listener") {
             return;
+        }
+        // Skip if agent already has marketplace entry with description (manual/richer)
+        if let Some(existing) = self.marketplace_get(agent_name).await {
+            if existing.description.is_some() || existing.tools.len() > 2 {
+                info!("Skipping auto-advertise for '{}' — has richer profile", agent_name);
+                return;
+            }
         }
 
         // Derive capabilities from project roles
@@ -2711,13 +2724,29 @@ impl DaemonState {
         domains.sort();
         domains.dedup();
 
+        // Merge with existing entry (don't overwrite richer manual data)
+        let existing = self.marketplace_get(agent_name).await;
+        let (merged_domains, merged_tools, description) = if let Some(existing) = existing {
+            let mut d = existing.domains.clone();
+            d.extend(domains);
+            d.sort();
+            d.dedup();
+            let mut t = existing.tools.clone();
+            t.extend(tools);
+            t.sort();
+            t.dedup();
+            (d, t, existing.description.clone())
+        } else {
+            (domains, tools, None)
+        };
+
         let caps = crate::marketplace::AgentCapabilities {
             agent_name: agent_name.to_string(),
             agent_did: None,
-            domains,
-            tools,
+            domains: merged_domains,
+            tools: merged_tools,
             availability: crate::marketplace::AgentAvailability::Available,
-            description: None,
+            description,
             updated_at: chrono::Utc::now(),
             address: None,
         };
@@ -3199,7 +3228,11 @@ impl DaemonState {
 
         // Record reputation contribution when task is completed
         let assignee_for_rep = if became_done {
-            project.tasks.iter().find(|t| t.id == *task_id).and_then(|t| t.assignee.clone())
+            project
+                .tasks
+                .iter()
+                .find(|t| t.id == *task_id)
+                .and_then(|t| t.assignee.clone())
         } else {
             None
         };
@@ -3768,6 +3801,58 @@ impl DaemonState {
     // -----------------------------------------------------------------------
     // Marketplace
     // -----------------------------------------------------------------------
+
+    // --- Discovery (gossip-based network discovery) ---
+
+    pub async fn discovery_upsert(&self, agent: crate::discovery::DiscoveredAgent) {
+        let mut store = self.inner.discovery.lock().await;
+        store.upsert_agent(agent);
+        let _ = store.save(&crate::discovery::DiscoveryStore::default_path());
+    }
+
+    pub async fn discovery_upsert_project_ad(&self, ad: crate::discovery::ProjectAd) {
+        let mut store = self.inner.discovery.lock().await;
+        store.upsert_project_ad(ad);
+        let _ = store.save(&crate::discovery::DiscoveryStore::default_path());
+    }
+
+    pub async fn discovery_list(&self) -> Vec<crate::discovery::DiscoveredAgent> {
+        let store = self.inner.discovery.lock().await;
+        store.list_agents().into_iter().cloned().collect()
+    }
+
+    pub async fn discovery_search(&self, query: &str) -> Vec<crate::discovery::DiscoveredAgent> {
+        let store = self.inner.discovery.lock().await;
+        store.search_agents(query).into_iter().cloned().collect()
+    }
+
+    pub async fn discovery_get(&self, did: &str) -> Option<crate::discovery::DiscoveredAgent> {
+        let store = self.inner.discovery.lock().await;
+        store.get_agent(did).cloned()
+    }
+
+    pub async fn discovery_project_ads(&self) -> Vec<crate::discovery::ProjectAd> {
+        let store = self.inner.discovery.lock().await;
+        store.list_project_ads().into_iter().cloned().collect()
+    }
+
+    pub async fn discovery_stats(&self) -> crate::discovery::DiscoveryStats {
+        let store = self.inner.discovery.lock().await;
+        store.stats()
+    }
+
+    pub async fn discovery_prune(&self) {
+        let mut store = self.inner.discovery.lock().await;
+        store.prune(crate::discovery::MAX_DISCOVERY_AGE_SECS);
+        let _ = store.save(&crate::discovery::DiscoveryStore::default_path());
+    }
+
+    // --- Marketplace ---
+
+    pub async fn marketplace_get(&self, agent_name: &str) -> Option<crate::marketplace::AgentCapabilities> {
+        let store = self.inner.marketplace.lock().await;
+        store.get(agent_name).cloned()
+    }
 
     pub async fn marketplace_upsert(&self, caps: crate::marketplace::AgentCapabilities) -> bool {
         let mut store = self.inner.marketplace.lock().await;

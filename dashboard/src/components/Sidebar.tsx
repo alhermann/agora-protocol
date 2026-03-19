@@ -293,6 +293,19 @@ export function Sidebar({
         })}
       </section>
 
+      {/* Network Discovery */}
+      <div className="sidebar-divider" />
+      <section className="sidebar-section">
+        <h3 className="sidebar-heading">
+          <button
+            onClick={() => onSelect({ type: 'network' })}
+            style={{ background: 'none', border: 'none', color: 'inherit', cursor: 'pointer', font: 'inherit', padding: 0, textTransform: 'inherit', letterSpacing: 'inherit', fontWeight: 'inherit' }}
+          >
+            Network
+          </button>
+        </h3>
+      </section>
+
       {/* Direct Messages — only shown if they exist */}
       {directMessages.length > 0 && (
         <>

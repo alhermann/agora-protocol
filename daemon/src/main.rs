@@ -5,6 +5,7 @@ mod config;
 mod coordinator;
 mod crypto;
 mod dashboard;
+mod discovery;
 mod format;
 mod github;
 mod identity;
