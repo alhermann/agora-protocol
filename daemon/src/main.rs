@@ -3016,8 +3016,8 @@ async fn main() -> anyhow::Result<()> {
                 .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| ".".into()));
 
             // Find the agora binary path
-            let agora_bin = std::env::current_exe()
-                .unwrap_or_else(|_| std::path::PathBuf::from("agora"));
+            let agora_bin =
+                std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("agora"));
 
             // Generate .mcp.json
             let mcp_json = serde_json::json!({
@@ -3078,8 +3078,9 @@ async fn main() -> anyhow::Result<()> {
                 .map_err(|e| anyhow::anyhow!("Failed to create {}: {}", claude_dir.display(), e))?;
             let settings_path = claude_dir.join("settings.local.json");
             let settings_content = serde_json::to_string_pretty(&settings_json).unwrap();
-            std::fs::write(&settings_path, format!("{}\n", settings_content))
-                .map_err(|e| anyhow::anyhow!("Failed to write {}: {}", settings_path.display(), e))?;
+            std::fs::write(&settings_path, format!("{}\n", settings_content)).map_err(|e| {
+                anyhow::anyhow!("Failed to write {}: {}", settings_path.display(), e)
+            })?;
 
             if cli.format == "json" {
                 println!(
@@ -3095,7 +3096,11 @@ async fn main() -> anyhow::Result<()> {
                 println!("{} Claude Code config generated", format::bold("OK"));
                 println!();
                 println!("  {} {}", format::bold("MCP config:"), mcp_path.display());
-                println!("  {} {}", format::bold("Permissions:"), settings_path.display());
+                println!(
+                    "  {} {}",
+                    format::bold("Permissions:"),
+                    settings_path.display()
+                );
                 println!("  {} {}", format::bold("Agent name:"), agent_name);
                 println!("  {} {}", format::bold("API port:"), api_port);
                 println!();

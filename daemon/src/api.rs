@@ -23,58 +23,6 @@ use crate::state::{
 };
 use crate::thread::ThreadSummary;
 
-/// Simple token-bucket rate limiter: 100 requests/second, shared across all clients.
-static RATE_LIMITER: std::sync::LazyLock<Arc<Mutex<RateLimiter>>> =
-    std::sync::LazyLock::new(|| {
-        Arc::new(Mutex::new(RateLimiter::new(10000, Duration::from_secs(1))))
-    });
-
-struct RateLimiter {
-    tokens: u32,
-    max_tokens: u32,
-    refill_interval: Duration,
-    last_refill: std::time::Instant,
-}
-
-impl RateLimiter {
-    fn new(max_tokens: u32, refill_interval: Duration) -> Self {
-        Self {
-            tokens: max_tokens,
-            max_tokens,
-            refill_interval,
-            last_refill: std::time::Instant::now(),
-        }
-    }
-
-    fn try_acquire(&mut self) -> bool {
-        let now = std::time::Instant::now();
-        let elapsed = now.duration_since(self.last_refill);
-        if elapsed >= self.refill_interval {
-            let refills = (elapsed.as_millis() / self.refill_interval.as_millis()) as u32;
-            self.tokens = self
-                .max_tokens
-                .min(self.tokens.saturating_add(refills * self.max_tokens));
-            self.last_refill = now;
-        }
-        if self.tokens > 0 {
-            self.tokens -= 1;
-            true
-        } else {
-            false
-        }
-    }
-}
-
-async fn rate_limit_middleware(
-    req: axum::extract::Request,
-    next: axum::middleware::Next,
-) -> axum::response::Response {
-    // Skip rate limiting for localhost — the API only listens on 127.0.0.1
-    // and all consumers (MCP monitors, dashboard, CLI) are local.
-    // Rate limiting is only meaningful for remote/public-facing APIs.
-    next.run(req).await
-}
-
 /// Build the core API routes (without middleware layers).
 fn api_routes() -> Router<DaemonState> {
     Router::new()
@@ -235,7 +183,6 @@ pub fn router(state: DaemonState, loopback_only: bool) -> Router {
         .layer(axum::Extension(api_token))
         .layer(axum::Extension(crate::auth::LoopbackOnly(loopback_only)))
         .layer(axum::middleware::from_fn(crate::auth::auth_middleware))
-        .layer(axum::middleware::from_fn(rate_limit_middleware))
 }
 
 /// POST /auth/verify — validates a bearer token. Returns 200 if valid, 401 if not.

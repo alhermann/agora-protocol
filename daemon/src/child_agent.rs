@@ -8,6 +8,8 @@ use tokio::process::Command;
 use tokio::sync::Notify;
 use tracing::{info, warn};
 
+const LISTENER_RETRY_DELAY: Duration = Duration::from_secs(2);
+
 #[derive(Debug, Clone)]
 pub struct ListenOptions {
     pub api_port: u16,
@@ -151,17 +153,33 @@ pub async fn listen(options: ListenOptions) -> Result<()> {
     );
 
     let mut listener_id =
-        register_consumer(&client, &api_base, &options.listener_label, true).await?;
+        register_consumer_with_retry(&client, &api_base, &options.listener_label).await?;
     let mut routes = ConversationRouteCache::default();
 
     loop {
-        let poll = poll_messages(&client, &api_base, listener_id, options.wait_timeout_secs);
         let outcome = tokio::select! {
             _ = tokio::signal::ctrl_c() => {
                 info!("Child-agent listener received Ctrl+C, shutting down");
                 break;
             }
-            outcome = poll => outcome?,
+            outcome = poll_messages(&client, &api_base, listener_id, options.wait_timeout_secs) => {
+                match outcome {
+                    Ok(outcome) => outcome,
+                    Err(err) => {
+                        warn!(
+                            "Child-agent listener consumer {} poll failed: {}. Re-registering listener '{}'",
+                            listener_id, err, options.listener_label
+                        );
+                        listener_id = register_consumer_with_retry(
+                            &client,
+                            &api_base,
+                            &options.listener_label,
+                        )
+                        .await?;
+                        continue;
+                    }
+                }
+            }
         };
 
         let messages = match outcome {
@@ -172,7 +190,8 @@ pub async fn listen(options: ListenOptions) -> Result<()> {
                     listener_id
                 );
                 listener_id =
-                    register_consumer(&client, &api_base, &options.listener_label, true).await?;
+                    register_consumer_with_retry(&client, &api_base, &options.listener_label)
+                        .await?;
                 continue;
             }
         };
@@ -261,6 +280,42 @@ pub async fn listen(options: ListenOptions) -> Result<()> {
     }
 
     Ok(())
+}
+
+async fn register_consumer_with_retry(
+    client: &reqwest::Client,
+    api_base: &str,
+    label: &str,
+) -> Result<u64> {
+    register_consumer_with_retry_and_delay(client, api_base, label, LISTENER_RETRY_DELAY).await
+}
+
+async fn register_consumer_with_retry_and_delay(
+    client: &reqwest::Client,
+    api_base: &str,
+    label: &str,
+    retry_delay: Duration,
+) -> Result<u64> {
+    loop {
+        match register_consumer(client, api_base, label, true).await {
+            Ok(id) => {
+                info!(
+                    "Child-agent listener '{}' registered consumer {}",
+                    label, id
+                );
+                return Ok(id);
+            }
+            Err(err) => {
+                warn!(
+                    "Failed to register child-agent listener '{}': {}. Retrying in {}s",
+                    label,
+                    err,
+                    retry_delay.as_secs()
+                );
+                tokio::time::sleep(retry_delay).await;
+            }
+        }
+    }
 }
 
 impl AgentRuntimeConfig {
@@ -841,6 +896,8 @@ async fn send_room_reply(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::{Json, Router, extract::State, http::StatusCode, routing::post};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn inbox(id: &str, from: &str, conversation_id: Option<&str>, body: &str) -> InboxMessage {
         InboxMessage {
@@ -896,5 +953,50 @@ mod tests {
     #[test]
     fn parse_backend_supports_codex() {
         assert!(matches!(parse_backend("codex"), Ok(Backend::Codex)));
+    }
+
+    #[derive(Clone)]
+    struct RegisterTestState {
+        attempts: Arc<AtomicUsize>,
+    }
+
+    async fn flaky_register_handler(
+        State(state): State<RegisterTestState>,
+    ) -> Result<Json<serde_json::Value>, StatusCode> {
+        let attempt = state.attempts.fetch_add(1, Ordering::SeqCst);
+        if attempt == 0 {
+            return Err(StatusCode::SERVICE_UNAVAILABLE);
+        }
+        Ok(Json(serde_json::json!({ "consumer_id": 42 })))
+    }
+
+    #[tokio::test]
+    async fn register_consumer_retries_after_transient_failure() {
+        let state = RegisterTestState {
+            attempts: Arc::new(AtomicUsize::new(0)),
+        };
+        let app = Router::new()
+            .route("/consumers", post(flaky_register_handler))
+            .with_state(state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let client = reqwest::Client::new();
+        let consumer_id = register_consumer_with_retry_and_delay(
+            &client,
+            &format!("http://{}", addr),
+            "codex-listener",
+            Duration::from_millis(10),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(consumer_id, 42);
+        assert!(state.attempts.load(Ordering::SeqCst) >= 2);
+
+        server.abort();
     }
 }

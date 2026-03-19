@@ -1172,6 +1172,8 @@ impl DaemonState {
         let id = self.register_consumer_inner(label, false).await;
         // Auto-clock-in: if this agent is a member of any project, clock them in
         self.auto_clock_in_agent(label).await;
+        // Auto-advertise in marketplace: register this agent as available
+        self.auto_advertise_agent(label).await;
         id
     }
 
@@ -2652,6 +2654,78 @@ impl DaemonState {
         }
     }
 
+    /// Auto-advertise agent in marketplace based on project roles.
+    async fn auto_advertise_agent(&self, agent_name: &str) {
+        // Skip internal consumers
+        if agent_name == "http-default" || agent_name.ends_with("-listener") {
+            return;
+        }
+
+        // Derive capabilities from project roles
+        let store = self.inner.projects.lock().await;
+        let mut domains = Vec::new();
+        let mut tools = Vec::new();
+
+        for project in store.list() {
+            if project.status != crate::project::ProjectStatus::Active {
+                continue;
+            }
+            for agent in &project.agents {
+                if agent.name == agent_name {
+                    use crate::project::ProjectRole;
+                    match agent.role {
+                        ProjectRole::Developer => {
+                            tools.push("code-development".to_string());
+                            tools.push("bug-fixing".to_string());
+                        }
+                        ProjectRole::Reviewer => {
+                            tools.push("code-review".to_string());
+                            tools.push("testing".to_string());
+                        }
+                        ProjectRole::Owner | ProjectRole::Overseer => {
+                            tools.push("project-management".to_string());
+                            tools.push("coordination".to_string());
+                        }
+                        ProjectRole::Consultant => {
+                            tools.push("design-proposals".to_string());
+                        }
+                        ProjectRole::Tester => {
+                            tools.push("testing".to_string());
+                            tools.push("qa".to_string());
+                        }
+                        _ => {}
+                    }
+                    // Add project repo as a domain hint
+                    if let Some(ref repo) = project.repo {
+                        if repo.contains("rust") || repo.contains("agora") {
+                            domains.push("rust".to_string());
+                        }
+                    }
+                }
+            }
+        }
+        drop(store);
+
+        tools.sort();
+        tools.dedup();
+        domains.sort();
+        domains.dedup();
+
+        let caps = crate::marketplace::AgentCapabilities {
+            agent_name: agent_name.to_string(),
+            agent_did: None,
+            domains,
+            tools,
+            availability: crate::marketplace::AgentAvailability::Available,
+            description: None,
+            updated_at: chrono::Utc::now(),
+            address: None,
+        };
+
+        self.marketplace_upsert(caps).await;
+        info!("Auto-advertised '{}' in marketplace", agent_name);
+    }
+
     pub async fn project_clock_in(
         &self,
         project_id: &Uuid,
@@ -3123,7 +3197,31 @@ impl DaemonState {
             }
         }
 
+        // Record reputation contribution when task is completed
+        let assignee_for_rep = if became_done {
+            project.tasks.iter().find(|t| t.id == *task_id).and_then(|t| t.assignee.clone())
+        } else {
+            None
+        };
+
         let _ = store.save();
+        drop(store);
+
+        // Record reputation outside the lock
+        if let Some(assignee) = assignee_for_rep {
+            self.reputation_record(crate::reputation::Contribution {
+                id: Uuid::new_v4(),
+                agent_name: assignee.clone(),
+                contribution_type: crate::reputation::ContributionType::TaskCompleted,
+                project_id: Some(*project_id),
+                quality: 1.0,
+                timestamp: chrono::Utc::now(),
+                description: None,
+            })
+            .await;
+            info!("Reputation recorded: {} completed a task", assignee);
+        }
+
         Ok(unblocked)
     }
 

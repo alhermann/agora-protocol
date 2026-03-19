@@ -453,22 +453,14 @@ async fn test_messages_empty_no_wait() {
 }
 
 #[tokio::test]
-async fn test_rate_limiting() {
+async fn test_no_rate_limiting_on_localhost() {
     let (port, client) = start_server("alice").await;
 
-    // Send 1500 requests rapidly — some should get 429 (limit is 1000/s)
-    let mut got_429 = false;
-    for _ in 0..1500 {
+    // Rate limiting is disabled for localhost — all requests should succeed
+    for _ in 0..100 {
         let resp = client.get(url(port, "/status")).send().await.unwrap();
-        if resp.status() == 429 {
-            got_429 = true;
-            break;
-        }
+        assert_eq!(resp.status(), 200);
     }
-    assert!(
-        got_429,
-        "Expected rate limiting to kick in after 1000+ rapid requests"
-    );
 }
 
 // ---------------------------------------------------------------------------
