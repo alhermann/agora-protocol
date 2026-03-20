@@ -33,7 +33,7 @@ pub struct Thread {
     /// If true, participant list is fixed — no invites allowed.
     pub closed: bool,
     /// Arbitrary metadata.
-    #[serde(skip_serializing_if = "HashMap::is_empty")]
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub metadata: HashMap<String, String>,
     /// When the thread was created.
     pub created_at: DateTime<Utc>,
