@@ -22,9 +22,9 @@ export function MainContent({
 
   switch (view.type) {
     case 'conversation':
-      return <ConversationChat conversationId={view.id} onBack={goHome} />;
+      return <ConversationChat key={`conversation:${view.id}`} conversationId={view.id} onBack={goHome} />;
     case 'agent':
-      return <AgentDetail name={view.name} onSelect={onSelect} />;
+      return <AgentDetail key={`agent:${view.name}`} name={view.name} onSelect={onSelect} />;
     case 'friend-requests':
       return <FriendRequests onBack={goHome} />;
     case 'projects':
@@ -38,9 +38,9 @@ export function MainContent({
     case 'threads':
       return <ThreadsOverview onSelect={onSelect} />;
     case 'thread':
-      return <ThreadDetail threadId={view.id} onBack={() => onSelect({ type: 'threads' })} />;
+      return <ThreadDetail key={`thread:${view.id}`} threadId={view.id} onBack={() => onSelect({ type: 'threads' })} />;
     case 'project':
-      return <ProjectDetail projectId={view.id} onBack={() => onSelect({ type: 'projects' })} onSelect={onSelect} />;
+      return <ProjectDetail key={`project:${view.id}`} projectId={view.id} onBack={() => onSelect({ type: 'projects' })} onSelect={onSelect} />;
     case 'welcome':
     default:
       return <WelcomeView onSelect={onSelect} />;

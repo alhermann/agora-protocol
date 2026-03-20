@@ -10,14 +10,15 @@
 use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 /// Peer identifier — plain String for now, will become `did:agora:...` later.
 pub type PeerId = String;
 
 /// A conversation thread / sub-group.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Thread {
     /// Unique thread identifier (also the conversation_id for messages).
     pub id: Uuid,
@@ -81,16 +82,36 @@ impl std::fmt::Display for ThreadError {
 }
 
 /// Manages all active threads.
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ThreadManager {
     threads: HashMap<Uuid, Thread>,
 }
 
 impl ThreadManager {
+    pub fn default_path() -> PathBuf {
+        crate::config::agora_home().join("threads.json")
+    }
+
     pub fn new() -> Self {
         Self {
             threads: HashMap::new(),
         }
+    }
+
+    pub fn load(path: &Path) -> Self {
+        match std::fs::read_to_string(path) {
+            Ok(data) => serde_json::from_str(&data).unwrap_or_else(|_| Self::new()),
+            Err(_) => Self::new(),
+        }
+    }
+
+    pub fn save(&self) -> anyhow::Result<()> {
+        let path = Self::default_path();
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&path, serde_json::to_string_pretty(self)?)?;
+        Ok(())
     }
 
     /// Create a new thread. Returns the thread ID.

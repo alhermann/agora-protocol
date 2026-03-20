@@ -34,6 +34,8 @@ pub struct AgoraMcpServer {
     inbox_notify: Arc<Notify>,
     /// Optional agent name for this MCP consumer (used as consumer label).
     agent_name: Option<String>,
+    /// Message IDs already shown as INCOMING (prevents showing same message twice).
+    seen_ids: Arc<Mutex<std::collections::HashSet<String>>>,
     /// Consumer ID assigned by the daemon after registration.
     consumer_id: Arc<Mutex<Option<u64>>>,
 }
@@ -47,6 +49,7 @@ impl AgoraMcpServer {
             pending: Arc::new(Mutex::new(VecDeque::new())),
             inbox_notify: Arc::new(Notify::new()),
             agent_name,
+            seen_ids: Arc::new(Mutex::new(std::collections::HashSet::new())),
             consumer_id: Arc::new(Mutex::new(None)),
         }
     }
@@ -642,13 +645,13 @@ impl AgoraMcpServer {
                 );
                 let mut result = format!("{}{}", header, body);
 
-                // Check 5 most recent conversations for unreplied messages
+                // Check ALL conversations with recent messages for unreplied messages
                 if let Ok(convos) = self.get("/conversations").await {
                     if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&convos) {
                         if let Some(list) = parsed.get("conversations").and_then(|c| c.as_array()) {
                             let mut unreplied = Vec::new();
-                            // Only check 5 most recent to limit HTTP calls
-                            for conv in list.iter().take(5) {
+                            // Check all conversations (not just top 5 — threads need this)
+                            for conv in list.iter() {
                                 let cid = match conv.get("conversation_id").and_then(|c| c.as_str())
                                 {
                                     Some(c) => c,
@@ -663,9 +666,8 @@ impl AgoraMcpServer {
                                         if let Some(msgs) =
                                             d.get("messages").and_then(|m| m.as_array())
                                         {
-                                            // Only show messages from the last 10 minutes
-                                            // (prevents agents from processing stale old threads)
-                                            let cutoff = chrono::Utc::now() - chrono::Duration::minutes(10);
+                                            // Check last message per conversation for unreplied
+                                            let mut seen = self.seen_ids.lock().await;
                                             for msg in msgs.iter().rev().take(2) {
                                                 let from = msg
                                                     .get("from")
@@ -675,15 +677,12 @@ impl AgoraMcpServer {
                                                     .get("body")
                                                     .and_then(|b| b.as_str())
                                                     .unwrap_or("");
-                                                let msg_time = msg
-                                                    .get("timestamp")
-                                                    .and_then(|t| t.as_str())
-                                                    .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
-                                                    .map(|t| t.with_timezone(&chrono::Utc));
-                                                // Skip messages older than 10 minutes
-                                                if let Some(t) = msg_time {
-                                                    if t < cutoff { continue; }
-                                                }
+                                                let msg_id = msg
+                                                    .get("id")
+                                                    .and_then(|i| i.as_str())
+                                                    .unwrap_or("");
+                                                // Skip already-seen messages
+                                                if seen.contains(msg_id) { continue; }
                                                 if from != agent_name && !body_text.is_empty() {
                                                     let replied = msgs.iter().any(|m2| {
                                                         m2.get("from").and_then(|f| f.as_str())
@@ -698,6 +697,10 @@ impl AgoraMcpServer {
                                                                     .unwrap_or("")
                                                     });
                                                     if !replied {
+                                                        // Mark as seen so we don't show it again
+                                                        if !msg_id.is_empty() {
+                                                            seen.insert(msg_id.to_string());
+                                                        }
                                                         unreplied.push(format!(
                                                             "[{}] {}",
                                                             from,
@@ -1411,7 +1414,13 @@ impl ServerHandler for AgoraMcpServer {
                  3. NO PARALLEL EDITS: One writes, one reviews. Never both write same file.\n\
                  4. TASK OWNERSHIP: in_progress = exclusive. Announce in #main what you work on.\n\
                  5. ANNOUNCE BEFORE ACTING: Post intent in #main, wait for objections.\n\
-                 6. ROOMS ONLY: All communication through project rooms. No direct messages.\n\n\
+                 6. ROOMS ONLY: All communication through project rooms. No direct messages.\n\
+                 7. THREAD MEANS THREAD: If a topic has a dedicated thread or conversation, \
+                    reply in that exact thread/conversation_id. Do not move it to #main or \
+                    another conversation unless there is an explicit escalation reason.\n\
+                 8. TOPIC MEANS TOPIC: If a discussion or task has a defined topic or \
+                    objective, stay on that topic. Do not hijack the thread with adjacent \
+                    issues. Open a new thread for materially different topics and link it.\n\n\
                  SCRUM / KANBAN WORKFLOW (strictly enforced):\n\
                  - Check your assigned tasks: call agora_project_tasks with action=list.\n\
                  - Before starting work: set task to in_progress. Only YOU work on it.\n\
@@ -1437,7 +1446,10 @@ impl ServerHandler for AgoraMcpServer {
                  report handoffs and status changes, and use project rooms to \
                  get review or technical input from other agents.\n\n\
                  When you receive a message, read it, think, compose a reply, and \
-                 send it via agora_send_message or project room send endpoints.\n\n\
+                 send it via agora_send_message or project room send endpoints. If the \
+                 message belongs to a specific thread/conversation, reply in that same \
+                 thread/conversation_id. If the conversation has a defined topic, keep \
+                 your reply on that topic or split the side issue into a new thread.\n\n\
                  Treat incoming Agora messages like messages from a colleague. You \
                  may receive requests to help with tasks, review code, discuss \
                  architecture, or join sub-groups.\n\n\

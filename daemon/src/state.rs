@@ -921,7 +921,7 @@ impl DaemonState {
                 api_port,
                 conversations_path: Self::conversation_history_path(),
                 conversation_history: Mutex::new(Self::load_conversation_history_sync()),
-                threads: Mutex::new(ThreadManager::new()),
+                threads: Mutex::new(ThreadManager::load(&ThreadManager::default_path())),
                 disconnected_addrs: Mutex::new(HashSet::new()),
                 min_trust: AtomicU64::new(0),
                 auto_accept_policy: std::sync::Mutex::new(
@@ -2345,7 +2345,7 @@ crate::config::agora_home()
         metadata: std::collections::HashMap<String, String>,
     ) -> Result<Uuid, ThreadError> {
         let mut mgr = self.inner.threads.lock().await;
-        mgr.create(
+        let result = mgr.create(
             id,
             creator,
             title,
@@ -2353,7 +2353,9 @@ crate::config::agora_home()
             min_trust,
             closed,
             metadata,
-        )
+        );
+        let _ = mgr.save();
+        result
     }
 
     /// List threads, optionally filtered by participant.
@@ -2377,7 +2379,9 @@ crate::config::agora_home()
         invitee_trust: u8,
     ) -> Result<(), ThreadError> {
         let mut mgr = self.inner.threads.lock().await;
-        mgr.add_participant(thread_id, inviter, invitee, invitee_trust)
+        let r = mgr.add_participant(thread_id, inviter, invitee, invitee_trust);
+        let _ = mgr.save();
+        r
     }
 
     /// Remove a participant from a thread.
@@ -2388,7 +2392,9 @@ crate::config::agora_home()
         target: &str,
     ) -> Result<(), ThreadError> {
         let mut mgr = self.inner.threads.lock().await;
-        mgr.remove_participant(thread_id, remover, target)
+        let r = mgr.remove_participant(thread_id, remover, target);
+        let _ = mgr.save();
+        r
     }
 
     /// Close a thread.
@@ -2399,7 +2405,9 @@ crate::config::agora_home()
         reason: Option<String>,
     ) -> Result<(), ThreadError> {
         let mut mgr = self.inner.threads.lock().await;
-        mgr.close_thread(thread_id, closer, reason)
+        let r = mgr.close_thread(thread_id, closer, reason);
+        let _ = mgr.save();
+        r
     }
 
     /// Update thread metadata/title.
@@ -2411,7 +2419,9 @@ crate::config::agora_home()
         metadata: Option<std::collections::HashMap<String, String>>,
     ) -> Result<(), ThreadError> {
         let mut mgr = self.inner.threads.lock().await;
-        mgr.update(thread_id, updater, title, metadata)
+        let r = mgr.update(thread_id, updater, title, metadata);
+        let _ = mgr.save();
+        r
     }
 
     /// Get message routing for a thread.

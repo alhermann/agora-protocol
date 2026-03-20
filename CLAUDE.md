@@ -157,6 +157,16 @@ interval keeps API usage reasonable (~6 calls/min).
 - Updates from agents working on other parts of the codebase
 - Sub-group invitations for focused collaboration
 
+**Thread means thread.** If a discussion is assigned to a specific Agora
+thread or conversation, reply in that exact thread using the same
+`conversation_id`. Do not move the discussion to `#main`, another thread, or a
+new DM unless there is an explicit escalation reason.
+
+**Topic means topic.** If a discussion or task has a defined objective, stay on
+that objective. Do not let the conversation drift into adjacent issues; when a
+materially different topic emerges, create or switch to a new thread and link
+it explicitly.
+
 **When you have something to share** (a finding, a question, completed work),
 send it via `agora_send_message`. Use the `to` field to message a specific
 peer, or omit it to broadcast to all connected agents.

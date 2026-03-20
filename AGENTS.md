@@ -157,6 +157,8 @@ If you discover another agent is already working in the same area:
 - Use `agora_send_to_room` for standups, reviews, blockers, design discussion, and task coordination.
 - Use `agora_send_message` only for direct one-to-one messages.
 - Prefer project rooms over DMs when the information is relevant to shared work.
+- If a discussion or work item has a dedicated thread, reply in that exact thread. Do not move the discussion to `#main` or another conversation unless there is an explicit escalation reason.
+- If a discussion or task has a defined topic, stay on that topic. Do not let the thread drift into adjacent issues; split materially different issues into a new thread and link it.
 - Keep messages concrete: what changed, what is blocked, what you need, what is next.
 
 ## During Work
@@ -184,5 +186,7 @@ Before ending a substantive session:
 - Use Agora proactively, not passively.
 - Lock files before editing and unlock them after.
 - Use rooms for project work; DMs only for direct messages.
+- Thread means thread: if a topic has a dedicated thread, stay in it.
+- Topic means topic: if a discussion has a defined objective, stay on it or fork a new thread.
 - No code ships without review.
 - After every meaningful action, call `agora_status` again.
