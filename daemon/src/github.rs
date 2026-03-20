@@ -15,8 +15,7 @@ pub struct GitHubConfig {
 
 impl GitHubConfig {
     pub fn path() -> std::path::PathBuf {
-crate::config::agora_home()
-            .join("github.json")
+        crate::config::agora_home().join("github.json")
     }
 
     pub fn load() -> Self {
@@ -93,19 +92,33 @@ pub async fn fetch_pull_requests(
 
     let mut prs = Vec::new();
     for pr in page.items {
-        let labels: Vec<String> = pr.labels.as_ref()
+        let labels: Vec<String> = pr
+            .labels
+            .as_ref()
             .map(|l| l.iter().map(|label| label.name.clone()).collect())
             .unwrap_or_default();
         prs.push(PullRequestInfo {
             number: pr.number,
             title: pr.title.clone().unwrap_or_default(),
-            author: pr.user.as_ref().map(|u| u.login.clone()).unwrap_or_default(),
-            state: if pr.merged_at.is_some() { "merged".into() } else { "open".into() },
+            author: pr
+                .user
+                .as_ref()
+                .map(|u| u.login.clone())
+                .unwrap_or_default(),
+            state: if pr.merged_at.is_some() {
+                "merged".into()
+            } else {
+                "open".into()
+            },
             draft: pr.draft.unwrap_or(false),
             labels,
             created_at: pr.created_at.map(|t| t.to_rfc3339()).unwrap_or_default(),
             updated_at: pr.updated_at.map(|t| t.to_rfc3339()).unwrap_or_default(),
-            html_url: pr.html_url.as_ref().map(|u| u.to_string()).unwrap_or_default(),
+            html_url: pr
+                .html_url
+                .as_ref()
+                .map(|u| u.to_string())
+                .unwrap_or_default(),
         });
     }
     Ok(prs)

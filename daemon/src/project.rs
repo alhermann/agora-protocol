@@ -599,8 +599,7 @@ pub struct ProjectInvitationStore {
 
 impl ProjectInvitationStore {
     pub fn default_path() -> PathBuf {
-        crate::config::agora_home()
-            .join("project_invitations.json")
+        crate::config::agora_home().join("project_invitations.json")
     }
 
     pub fn load(path: &Path) -> Self {

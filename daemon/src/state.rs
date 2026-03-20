@@ -140,6 +140,18 @@ struct ConsumerSlot {
     rate_limiter: ConsumerRateLimiter,
 }
 
+fn enqueue_consumer_message(slot: &mut ConsumerSlot, msg: Message) -> bool {
+    if slot.buffer.iter().any(|existing| existing.id == msg.id) {
+        return false;
+    }
+    while slot.buffer.len() >= 1000 {
+        slot.buffer.pop_front();
+    }
+    slot.buffer.push_back(msg);
+    slot.notify.notify_waiters();
+    true
+}
+
 /// Public consumer info returned by the API.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ConsumerInfo {
@@ -582,8 +594,7 @@ pub struct FriendRequestStore {
 impl FriendRequestStore {
     /// Default path: `~/.agora/friend_requests.json`
     pub fn default_path() -> PathBuf {
-        crate::config::agora_home()
-            .join("friend_requests.json")
+        crate::config::agora_home().join("friend_requests.json")
     }
 
     /// Load from disk, or start empty if file doesn't exist.
@@ -1415,12 +1426,7 @@ impl DaemonState {
                     && now.signed_duration_since(slot.last_active).num_seconds() < 60
             });
             for slot in consumers.values_mut() {
-                // Cap buffer at 1000 messages to prevent unbounded growth
-                while slot.buffer.len() >= 1000 {
-                    slot.buffer.pop_front();
-                }
-                slot.buffer.push_back(msg.clone());
-                slot.notify.notify_waiters();
+                enqueue_consumer_message(slot, msg.clone());
             }
             active
         };
@@ -1569,12 +1575,7 @@ impl DaemonState {
                     owner_did: None,
                     owner_attestation: None,
                 };
-                while slot.buffer.len() >= 1000 {
-                    slot.buffer.pop_front();
-                }
-                slot.buffer.push_back(inbound);
-                slot.notify.notify_waiters();
-                delivered = true;
+                delivered |= enqueue_consumer_message(slot, inbound);
             }
         }
         if delivered {
@@ -1823,8 +1824,7 @@ impl DaemonState {
 
     /// Path for persisting conversation history on shutdown.
     fn conversation_history_path() -> std::path::PathBuf {
-crate::config::agora_home()
-            .join("conversation_history.json")
+        crate::config::agora_home().join("conversation_history.json")
     }
 
     /// Load conversation history from disk synchronously (called during construction).
@@ -3720,7 +3720,6 @@ crate::config::agora_home()
         store.prune(crate::discovery::MAX_DISCOVERY_AGE_SECS);
         let _ = store.save(&crate::discovery::DiscoveryStore::default_path());
     }
-
 }
 
 // ---------------------------------------------------------------------------
@@ -4010,6 +4009,7 @@ pub fn validate_name(name: &str, field: &str, max_len: usize) -> Result<(), Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::message::{Message, MessageType};
 
     fn make_peer(name: &str, session_id: Option<Uuid>) -> PeerInfo {
         PeerInfo {
@@ -4026,6 +4026,38 @@ mod tests {
             owner_verified: false,
             last_seen: Some(chrono::Utc::now()),
             disconnect: Arc::new(Notify::new()),
+        }
+    }
+
+    fn make_message(from: &str, body: &str) -> Message {
+        Message {
+            version: "1".to_string(),
+            msg_type: MessageType::Message,
+            from: from.to_string(),
+            body: body.to_string(),
+            timestamp: chrono::Utc::now(),
+            id: Uuid::new_v4(),
+            reply_to: None,
+            conversation_id: None,
+            did: None,
+            public_key: None,
+            session_id: None,
+            signature: None,
+            owner_did: None,
+            owner_attestation: None,
+        }
+    }
+
+    fn make_outbound_message(to: &str, body: &str) -> OutboundMessage {
+        OutboundMessage {
+            body: body.to_string(),
+            to: Some(to.to_string()),
+            id: Uuid::new_v4(),
+            reply_to: None,
+            conversation_id: None,
+            msg_type: None,
+            project_id: None,
+            from_override: Some("claude".to_string()),
         }
     }
 
@@ -4164,6 +4196,50 @@ mod tests {
         let refreshed = state.wake_status().await;
         assert_eq!(refreshed.active_listener_count, 1);
         assert!(!refreshed.armed);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_push_inbox_deduplicates_per_consumer_by_message_id() {
+        let dir = std::env::temp_dir().join(format!("agora-state-test-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let friends_path = dir.join("friends.json");
+        let state = DaemonState::new("test-node", &friends_path, 7313);
+        let listener = state.register_listener_consumer("codex-listener").await;
+
+        let msg = make_message("claude", "duplicate");
+        state.push_inbox(msg.clone()).await;
+        state.push_inbox(msg).await;
+
+        let buffered = state.peek_consumer(listener).await.unwrap();
+        assert_eq!(buffered.len(), 1);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_local_consumer_delivery_deduplicates_by_message_id() {
+        let dir = std::env::temp_dir().join(format!("agora-state-test-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let friends_path = dir.join("friends.json");
+        let state = DaemonState::new("test-node", &friends_path, 7313);
+        let listener = state.register_listener_consumer("codex-listener").await;
+
+        let msg = make_outbound_message("codex-listener", "local duplicate");
+        assert!(
+            state
+                .deliver_to_local_consumer("codex-listener", &msg)
+                .await
+        );
+        assert!(
+            !state
+                .deliver_to_local_consumer("codex-listener", &msg)
+                .await
+        );
+
+        let buffered = state.peek_consumer(listener).await.unwrap();
+        assert_eq!(buffered.len(), 1);
 
         std::fs::remove_dir_all(&dir).unwrap();
     }

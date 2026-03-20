@@ -1287,10 +1287,7 @@ async fn test_thread_send_routes_only_to_participants() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
-    let worker_id = resp
-        .json::<serde_json::Value>()
-        .await
-        .unwrap()["consumer_id"]
+    let worker_id = resp.json::<serde_json::Value>().await.unwrap()["consumer_id"]
         .as_u64()
         .unwrap();
 
@@ -1301,10 +1298,7 @@ async fn test_thread_send_routes_only_to_participants() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
-    let spectator_id = resp
-        .json::<serde_json::Value>()
-        .await
-        .unwrap()["consumer_id"]
+    let spectator_id = resp.json::<serde_json::Value>().await.unwrap()["consumer_id"]
         .as_u64()
         .unwrap();
 
@@ -1318,10 +1312,7 @@ async fn test_thread_send_routes_only_to_participants() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
-    let thread_id = resp
-        .json::<serde_json::Value>()
-        .await
-        .unwrap()["thread_id"]
+    let thread_id = resp.json::<serde_json::Value>().await.unwrap()["thread_id"]
         .as_str()
         .unwrap()
         .to_string();

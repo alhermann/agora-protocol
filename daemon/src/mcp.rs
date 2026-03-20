@@ -682,7 +682,9 @@ impl AgoraMcpServer {
                                                     .and_then(|i| i.as_str())
                                                     .unwrap_or("");
                                                 // Skip already-seen messages
-                                                if seen.contains(msg_id) { continue; }
+                                                if seen.contains(msg_id) {
+                                                    continue;
+                                                }
                                                 if from != agent_name && !body_text.is_empty() {
                                                     let replied = msgs.iter().any(|m2| {
                                                         m2.get("from").and_then(|f| f.as_str())

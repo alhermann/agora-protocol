@@ -276,8 +276,7 @@ pub struct OwnerAttestation {
 impl OwnerAttestation {
     /// Default path for the attestation file.
     pub fn default_path() -> PathBuf {
-        crate::config::agora_home()
-            .join("owner_attestation.json")
+        crate::config::agora_home().join("owner_attestation.json")
     }
 
     /// Build the canonical message that gets signed.

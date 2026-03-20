@@ -441,11 +441,13 @@ enum AgentAction {
 }
 
 fn pid_file_path() -> std::path::PathBuf {
-crate::config::agora_home()
-        .join("agora.pid")
+    crate::config::agora_home().join("agora.pid")
 }
 
-fn agora_state_dir() -> PathBuf { return crate::config::agora_home(); }  fn _agora_state_dir_old() -> PathBuf {
+fn agora_state_dir() -> PathBuf {
+    return crate::config::agora_home();
+}
+fn _agora_state_dir_old() -> PathBuf {
     if let Ok(dir) = std::env::var("AGORA_HOME") {
         return PathBuf::from(dir);
     }

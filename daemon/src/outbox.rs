@@ -69,7 +69,6 @@ impl OutboxStore {
 
     /// Default outbox directory: `~/.agora/outbox/`
     pub fn default_path() -> PathBuf {
-        
         crate::config::agora_home().join("outbox")
     }
 

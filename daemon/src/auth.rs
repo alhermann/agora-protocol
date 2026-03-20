@@ -22,7 +22,6 @@ struct ApiTokenFile {
 
 /// Default path: `~/.agora/api_token.json`
 pub fn default_token_path() -> PathBuf {
-    
     crate::config::agora_home().join("api_token.json")
 }
 

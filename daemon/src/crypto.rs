@@ -23,7 +23,6 @@ pub struct CryptoMeta {
 
 impl CryptoMeta {
     pub fn default_path() -> PathBuf {
-        
         crate::config::agora_home().join("crypto.json")
     }
 

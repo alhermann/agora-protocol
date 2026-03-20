@@ -11,6 +11,9 @@ use tracing::{info, warn};
 
 const LISTENER_RETRY_DELAY: Duration = Duration::from_secs(2);
 const LISTENER_RECONCILE_INTERVAL: Duration = Duration::from_secs(2);
+const LISTENER_BACKLOG_WATCHDOG_INTERVAL: Duration = Duration::from_secs(5);
+const LISTENER_STUCK_BACKLOG_THRESHOLD: Duration = Duration::from_secs(15);
+const LISTENER_RECOVERY_COOLDOWN: Duration = Duration::from_secs(10);
 const AGENT_BACKEND_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone)]
@@ -64,6 +67,17 @@ struct AgentRuntimeConfig {
 #[derive(Debug, Deserialize)]
 struct RegisterConsumerResponse {
     consumer_id: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct ConsumersResponse {
+    consumers: Vec<ConsumerInfo>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ConsumerInfo {
+    consumer_id: u64,
+    buffered_messages: usize,
 }
 
 #[derive(Debug, Deserialize)]
@@ -147,6 +161,37 @@ struct ListenerRegistration {
     daemon_session_id: String,
 }
 
+#[derive(Debug, Clone)]
+struct ListenerProgress {
+    last_progress_at: Instant,
+    processing_started_at: Option<Instant>,
+}
+
+impl Default for ListenerProgress {
+    fn default() -> Self {
+        Self {
+            last_progress_at: Instant::now(),
+            processing_started_at: None,
+        }
+    }
+}
+
+impl ListenerProgress {
+    fn mark_progress(&mut self) {
+        self.last_progress_at = Instant::now();
+    }
+
+    fn start_processing(&mut self) {
+        self.processing_started_at = Some(Instant::now());
+        self.mark_progress();
+    }
+
+    fn finish_processing(&mut self) {
+        self.processing_started_at = None;
+        self.mark_progress();
+    }
+}
+
 #[derive(Default)]
 struct ConversationRouteCache {
     routes: HashMap<String, RoomRoute>,
@@ -184,6 +229,8 @@ pub async fn listen(options: ListenOptions) -> Result<()> {
     let registration = Arc::new(Mutex::new(
         reconcile_listener_registration(&client, &api_base, &options.listener_label, None).await?,
     ));
+    let progress = Arc::new(Mutex::new(ListenerProgress::default()));
+    let recovery_notify = Arc::new(Notify::new());
     let mut routes = ConversationRouteCache::default();
     let reconcile_stop = Arc::new(Notify::new());
     let reconcile_task = tokio::spawn(run_listener_reconcile_loop(
@@ -193,6 +240,16 @@ pub async fn listen(options: ListenOptions) -> Result<()> {
         registration.clone(),
         reconcile_stop.clone(),
     ));
+    let watchdog_stop = Arc::new(Notify::new());
+    let watchdog_task = tokio::spawn(run_listener_backlog_watchdog(
+        client.clone(),
+        api_base.clone(),
+        options.listener_label.clone(),
+        registration.clone(),
+        progress.clone(),
+        recovery_notify.clone(),
+        watchdog_stop.clone(),
+    ));
 
     loop {
         let listener_id = { registration.lock().await.consumer_id };
@@ -200,6 +257,16 @@ pub async fn listen(options: ListenOptions) -> Result<()> {
             _ = tokio::signal::ctrl_c() => {
                 info!("Child-agent listener received Ctrl+C, shutting down");
                 break;
+            }
+            _ = recovery_notify.notified() => {
+                warn!(
+                    "Child-agent listener '{}' detected a stalled backlog on consumer {}. \
+                     Interrupting the current poll loop for a fresh drain",
+                    options.listener_label,
+                    listener_id
+                );
+                progress.lock().await.mark_progress();
+                continue;
             }
             outcome = poll_messages(&client, &api_base, listener_id, options.wait_timeout_secs) => {
                 match outcome {
@@ -218,6 +285,7 @@ pub async fn listen(options: ListenOptions) -> Result<()> {
                         )
                         .await?;
                         *registration.lock().await = refreshed;
+                        progress.lock().await.mark_progress();
                         continue;
                     }
                 }
@@ -240,9 +308,12 @@ pub async fn listen(options: ListenOptions) -> Result<()> {
                 )
                 .await?;
                 *registration.lock().await = refreshed;
+                progress.lock().await.mark_progress();
                 continue;
             }
         };
+
+        progress.lock().await.mark_progress();
 
         if messages.is_empty() {
             if options.once {
@@ -271,12 +342,14 @@ pub async fn listen(options: ListenOptions) -> Result<()> {
                 registration.clone(),
                 heartbeat_stop.clone(),
             ));
+            progress.lock().await.start_processing();
 
             let reply = match call_agent(&client, &cfg, &options, &batch, route.as_ref()).await {
                 Ok(reply) => reply,
                 Err(err) => {
                     heartbeat_stop.notify_waiters();
                     let _ = heartbeat_task.await;
+                    progress.lock().await.finish_processing();
                     warn!(
                         "Child-agent backend failed for message from {}: {}",
                         batch.from, err
@@ -287,6 +360,7 @@ pub async fn listen(options: ListenOptions) -> Result<()> {
 
             heartbeat_stop.notify_waiters();
             let _ = heartbeat_task.await;
+            progress.lock().await.finish_processing();
 
             let Some(reply) = normalize_reply(&reply, &options.send_as) else {
                 continue;
@@ -314,6 +388,8 @@ pub async fn listen(options: ListenOptions) -> Result<()> {
             {
                 warn!("Failed to send direct reply to {}: {}", batch.from, err);
             }
+
+            progress.lock().await.mark_progress();
         }
 
         if options.once {
@@ -322,7 +398,9 @@ pub async fn listen(options: ListenOptions) -> Result<()> {
     }
 
     reconcile_stop.notify_waiters();
+    watchdog_stop.notify_waiters();
     let _ = reconcile_task.await;
+    let _ = watchdog_task.await;
 
     let listener_id = { registration.lock().await.consumer_id };
     if let Err(err) = unregister_consumer(&client, &api_base, listener_id).await {
@@ -476,6 +554,72 @@ async fn run_listener_reconcile_loop(
     }
 }
 
+async fn run_listener_backlog_watchdog(
+    client: reqwest::Client,
+    api_base: String,
+    label: String,
+    registration: Arc<Mutex<ListenerRegistration>>,
+    progress: Arc<Mutex<ListenerProgress>>,
+    recovery_notify: Arc<Notify>,
+    stop: Arc<Notify>,
+) {
+    let mut interval = tokio::time::interval(LISTENER_BACKLOG_WATCHDOG_INTERVAL);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut last_recovery_at: Option<Instant> = None;
+
+    loop {
+        tokio::select! {
+            _ = stop.notified() => break,
+            _ = interval.tick() => {
+                let current = { registration.lock().await.clone() };
+                let backlog = match fetch_consumer_backlog(&client, &api_base, current.consumer_id).await {
+                    Ok(Some(backlog)) => backlog,
+                    Ok(None) => continue,
+                    Err(err) => {
+                        warn!(
+                            "Child-agent listener '{}' backlog watchdog failed to inspect consumer {}: {}",
+                            label, current.consumer_id, err
+                        );
+                        continue;
+                    }
+                };
+
+                if backlog == 0 {
+                    last_recovery_at = None;
+                    continue;
+                }
+
+                let snapshot = { progress.lock().await.clone() };
+                if snapshot.processing_started_at.is_some() {
+                    continue;
+                }
+
+                let stalled_for = snapshot.last_progress_at.elapsed();
+                if stalled_for < LISTENER_STUCK_BACKLOG_THRESHOLD {
+                    continue;
+                }
+
+                if last_recovery_at
+                    .is_some_and(|last| last.elapsed() < LISTENER_RECOVERY_COOLDOWN)
+                {
+                    continue;
+                }
+
+                warn!(
+                    "Child-agent listener '{}' has {} buffered message(s) on consumer {} \
+                     with no progress for {}s. Nudging the poll loop to recover",
+                    label,
+                    backlog,
+                    current.consumer_id,
+                    stalled_for.as_secs()
+                );
+                last_recovery_at = Some(Instant::now());
+                recovery_notify.notify_one();
+            }
+        }
+    }
+}
+
 impl AgentRuntimeConfig {
     fn load() -> Result<Self> {
         let config_path = default_agent_config_path();
@@ -574,7 +718,6 @@ impl ConversationRouteCache {
 }
 
 fn default_agent_config_path() -> PathBuf {
-    
     crate::config::agora_home().join("agent.toml")
 }
 
@@ -690,6 +833,29 @@ async fn poll_messages(
         }
         status => bail!("consumer poll failed with status {}", status),
     }
+}
+
+async fn fetch_consumer_backlog(
+    client: &reqwest::Client,
+    api_base: &str,
+    consumer_id: u64,
+) -> Result<Option<usize>> {
+    let response = client
+        .get(format!("{}/consumers", api_base))
+        .send()
+        .await
+        .context("failed to list consumers for backlog watchdog")?
+        .error_for_status()
+        .context("consumer list request failed for backlog watchdog")?
+        .json::<ConsumersResponse>()
+        .await
+        .context("failed to decode consumer list for backlog watchdog")?;
+
+    Ok(response
+        .consumers
+        .into_iter()
+        .find(|consumer| consumer.consumer_id == consumer_id)
+        .map(|consumer| consumer.buffered_messages))
 }
 
 async fn call_agent(
@@ -1310,12 +1476,9 @@ mod tests {
         std::fs::create_dir_all(codex.parent().unwrap()).unwrap();
         std::fs::write(&codex, "#!/bin/sh\n").unwrap();
 
-        let resolved = resolve_codex_binary_with(
-            Some(OsStr::new("/usr/bin:/bin")),
-            Some(temp.path()),
-            None,
-        )
-        .unwrap();
+        let resolved =
+            resolve_codex_binary_with(Some(OsStr::new("/usr/bin:/bin")), Some(temp.path()), None)
+                .unwrap();
 
         assert_eq!(resolved, codex);
     }

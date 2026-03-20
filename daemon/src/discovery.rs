@@ -282,7 +282,6 @@ pub struct DiscoveryStore {
 
 impl DiscoveryStore {
     pub fn default_path() -> PathBuf {
-        
         crate::config::agora_home().join("discovery.json")
     }
 

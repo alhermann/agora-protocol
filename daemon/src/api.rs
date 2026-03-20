@@ -3367,27 +3367,57 @@ async fn github_pull_requests(
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let project_id = Uuid::parse_str(&id).map_err(|_| {
-        (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: "Invalid project ID".to_string() }))
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Invalid project ID".to_string(),
+            }),
+        )
     })?;
     let project = state.get_project(&project_id).await.ok_or_else(|| {
-        (StatusCode::NOT_FOUND, Json(ErrorResponse { error: "Project not found".to_string() }))
+        (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: "Project not found".to_string(),
+            }),
+        )
     })?;
     let repo_url = project.repo.as_deref().ok_or_else(|| {
-        (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: "No repo linked".to_string() }))
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "No repo linked".to_string(),
+            }),
+        )
     })?;
     let (owner, repo) = crate::github::parse_github_repo(repo_url).ok_or_else(|| {
-        (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: "Cannot parse repo URL".to_string() }))
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Cannot parse repo URL".to_string(),
+            }),
+        )
     })?;
     let cfg = crate::github::GitHubConfig::load();
     let token = cfg.token.ok_or_else(|| {
-        (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: "No GitHub token configured".to_string() }))
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "No GitHub token configured".to_string(),
+            }),
+        )
     })?;
     let prs = crate::github::fetch_pull_requests(&token, &owner, &repo)
         .await
         .map_err(|e| {
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e }))
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse { error: e }),
+            )
         })?;
-    Ok(Json(serde_json::json!({ "count": prs.len(), "pull_requests": prs })))
+    Ok(Json(
+        serde_json::json!({ "count": prs.len(), "pull_requests": prs }),
+    ))
 }
 
 /// GET /github/config — get GitHub configuration.
@@ -3536,7 +3566,6 @@ async fn discovery_stats(
 ) -> Json<crate::discovery::DiscoveryStats> {
     Json(state.discovery_stats().await)
 }
-
 
 // ---------------------------------------------------------------------------
 // Project Rooms endpoints
