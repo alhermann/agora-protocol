@@ -255,8 +255,8 @@ pub struct DiscoveryStore {
 
 impl DiscoveryStore {
     pub fn default_path() -> PathBuf {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        PathBuf::from(home).join(".agora").join("discovery.json")
+        
+        crate::config::agora_home().join("discovery.json")
     }
 
     pub fn load(path: &Path) -> Self {

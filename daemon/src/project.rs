@@ -529,7 +529,7 @@ pub struct ProjectStore {
 impl ProjectStore {
     pub fn default_path() -> PathBuf {
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        PathBuf::from(home).join(".agora").join("projects.json")
+        crate::config::agora_home().join("projects.json")
     }
 
     pub fn load(path: &Path) -> Self {
@@ -599,9 +599,7 @@ pub struct ProjectInvitationStore {
 
 impl ProjectInvitationStore {
     pub fn default_path() -> PathBuf {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        PathBuf::from(home)
-            .join(".agora")
+        crate::config::agora_home()
             .join("project_invitations.json")
     }
 

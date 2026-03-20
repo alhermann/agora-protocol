@@ -80,8 +80,8 @@ pub struct MarketplaceStore {
 
 impl MarketplaceStore {
     pub fn default_path() -> PathBuf {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        PathBuf::from(home).join(".agora").join("marketplace.json")
+        
+        crate::config::agora_home().join("marketplace.json")
     }
 
     pub fn load(path: &Path) -> Self {

@@ -1327,3 +1327,121 @@ async fn test_dashboard_index_served() {
         resp.status()
     );
 }
+
+#[tokio::test]
+async fn test_thread_send_routes_only_to_participants() {
+    let (port, client) = start_server("claude").await;
+
+    let resp = client
+        .post(url(port, "/consumers"))
+        .json(&serde_json::json!({ "label": "claude" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let resp = client
+        .post(url(port, "/consumers"))
+        .json(&serde_json::json!({ "label": "codex" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let resp = client
+        .post(url(port, "/consumers"))
+        .json(&serde_json::json!({ "label": "worker" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let worker_id = resp
+        .json::<serde_json::Value>()
+        .await
+        .unwrap()["consumer_id"]
+        .as_u64()
+        .unwrap();
+
+    let resp = client
+        .post(url(port, "/consumers"))
+        .json(&serde_json::json!({ "label": "spectator" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let spectator_id = resp
+        .json::<serde_json::Value>()
+        .await
+        .unwrap()["consumer_id"]
+        .as_u64()
+        .unwrap();
+
+    let resp = client
+        .post(url(port, "/threads"))
+        .json(&serde_json::json!({
+            "title": "routing-test",
+            "participants": ["codex", "worker"]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let thread_id = resp
+        .json::<serde_json::Value>()
+        .await
+        .unwrap()["thread_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let resp = client
+        .post(url(port, "/send"))
+        .json(&serde_json::json!({
+            "from": "codex",
+            "conversation_id": thread_id,
+            "body": "hello thread"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let worker_msgs = client
+        .get(url(
+            port,
+            &format!("/consumers/{}/messages?peek=true&timeout=1", worker_id),
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(worker_msgs.status(), 200);
+    let worker_msgs: serde_json::Value = worker_msgs.json().await.unwrap();
+    let worker_msgs = worker_msgs.as_array().unwrap();
+    assert_eq!(worker_msgs.len(), 1);
+    assert_eq!(worker_msgs[0]["body"], "hello thread");
+    assert_eq!(worker_msgs[0]["conversation_id"], thread_id);
+
+    let spectator_msgs = client
+        .get(url(
+            port,
+            &format!("/consumers/{}/messages?peek=true&timeout=1", spectator_id),
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(spectator_msgs.status(), 200);
+    let spectator_msgs: serde_json::Value = spectator_msgs.json().await.unwrap();
+    assert!(spectator_msgs.as_array().unwrap().is_empty());
+
+    let resp = client
+        .post(url(port, "/send"))
+        .json(&serde_json::json!({
+            "from": "spectator",
+            "conversation_id": thread_id,
+            "body": "should fail"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403);
+}

@@ -7,6 +7,8 @@ import { ProjectsOverview } from './ProjectsOverview';
 import { AgentsOverview } from './AgentsOverview';
 import { MessagesOverview } from './MessagesOverview';
 import { NetworkOverview } from './NetworkOverview';
+import { ThreadsOverview } from './ThreadsOverview';
+import { ThreadDetail } from './ThreadDetail';
 import ProjectDetail from './ProjectDetail';
 
 export function MainContent({
@@ -33,6 +35,10 @@ export function MainContent({
       return <MessagesOverview onSelect={onSelect} />;
     case 'network':
       return <NetworkOverview onSelect={onSelect} />;
+    case 'threads':
+      return <ThreadsOverview onSelect={onSelect} />;
+    case 'thread':
+      return <ThreadDetail threadId={view.id} onBack={() => onSelect({ type: 'threads' })} />;
     case 'project':
       return <ProjectDetail projectId={view.id} onBack={() => onSelect({ type: 'projects' })} onSelect={onSelect} />;
     case 'welcome':

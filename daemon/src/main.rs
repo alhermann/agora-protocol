@@ -524,18 +524,15 @@ enum AgentAction {
 }
 
 fn pid_file_path() -> std::path::PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    std::path::PathBuf::from(home)
-        .join(".agora")
+crate::config::agora_home()
         .join("agora.pid")
 }
 
-fn agora_state_dir() -> PathBuf {
+fn agora_state_dir() -> PathBuf { return crate::config::agora_home(); }  fn _agora_state_dir_old() -> PathBuf {
     if let Ok(dir) = std::env::var("AGORA_HOME") {
         return PathBuf::from(dir);
     }
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home).join(".agora")
+    crate::config::agora_home()
 }
 
 fn sanitized_listener_label(label: &str) -> String {

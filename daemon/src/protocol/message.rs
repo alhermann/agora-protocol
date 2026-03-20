@@ -586,6 +586,25 @@ impl Message {
     }
 
     #[allow(dead_code)]
+    pub fn heartbeat(from: &str) -> Self {
+        Self {
+            version: "0.1.0".to_string(),
+            msg_type: MessageType::Heartbeat,
+            from: from.to_string(),
+            body: String::new(),
+            timestamp: Utc::now(),
+            id: Uuid::new_v4(),
+            reply_to: None,
+            conversation_id: None,
+            did: None,
+            public_key: None,
+            session_id: None,
+            signature: None,
+            owner_did: None,
+            owner_attestation: None,
+        }
+    }
+
     pub fn close(from: &str) -> Self {
         Self {
             version: "0.1.0".to_string(),

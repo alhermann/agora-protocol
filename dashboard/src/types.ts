@@ -327,7 +327,9 @@ export type ViewState =
   | { type: 'project'; id: string }
   | { type: 'agents' }
   | { type: 'messages' }
-  | { type: 'network' };
+  | { type: 'network' }
+  | { type: 'threads' }
+  | { type: 'thread'; id: string };
 
 // Activity log — unified event timeline for the monitor dashboard
 

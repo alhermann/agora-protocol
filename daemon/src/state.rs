@@ -295,7 +295,7 @@ impl FriendsStore {
     /// Default path: `~/.agora/friends.json`
     pub fn default_path() -> PathBuf {
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        PathBuf::from(home).join(".agora").join("friends.json")
+        crate::config::agora_home().join("friends.json")
     }
 
     /// Load from disk, or start empty if file doesn't exist.
@@ -582,9 +582,7 @@ pub struct FriendRequestStore {
 impl FriendRequestStore {
     /// Default path: `~/.agora/friend_requests.json`
     pub fn default_path() -> PathBuf {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        PathBuf::from(home)
-            .join(".agora")
+        crate::config::agora_home()
             .join("friend_requests.json")
     }
 
@@ -817,6 +815,8 @@ pub struct PeerInfo {
     pub session_id: Option<Uuid>,
     /// Whether the peer's cryptographic signature was verified.
     pub verified: bool,
+    /// Last heartbeat/message timestamp for presence tracking.
+    pub last_seen: Option<chrono::DateTime<chrono::Utc>>,
     /// Peer's owner DID (if provided and verified in Hello).
     pub owner_did: Option<String>,
     /// Whether the peer's owner attestation was verified.
@@ -1649,6 +1649,14 @@ impl DaemonState {
             .any(|p| p.address == addr)
     }
 
+    /// Update last_seen timestamp for a peer (heartbeat/presence tracking).
+    pub async fn update_peer_last_seen(&self, name: &str) {
+        let mut peers = self.inner.peers.lock().await;
+        if let Some(peer) = peers.iter_mut().find(|p| p.name == name) {
+            peer.last_seen = Some(chrono::Utc::now());
+        }
+    }
+
     /// Remove a disconnected peer.
     pub async fn remove_peer(&self, address: &str) {
         self.inner
@@ -1835,9 +1843,7 @@ impl DaemonState {
 
     /// Path for persisting conversation history on shutdown.
     fn conversation_history_path() -> std::path::PathBuf {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        std::path::PathBuf::from(home)
-            .join(".agora")
+crate::config::agora_home()
             .join("conversation_history.json")
     }
 
@@ -3999,7 +4005,7 @@ fn format_duration(d: std::time::Duration) -> String {
 /// Default path: `~/.agora/wake.json`
 fn wake_command_path() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home).join(".agora").join("wake.json")
+    crate::config::agora_home().join("wake.json")
 }
 
 fn load_wake_command(path: &Path) -> Option<String> {
@@ -4274,6 +4280,7 @@ mod tests {
             verified: false,
             owner_did: None,
             owner_verified: false,
+            last_seen: Some(chrono::Utc::now()),
             disconnect: Arc::new(Notify::new()),
         }
     }

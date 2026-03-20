@@ -29,7 +29,7 @@ impl AgentIdentity {
     /// Default path for the identity key file.
     pub fn default_path() -> PathBuf {
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        PathBuf::from(home).join(".agora").join("identity.key")
+        crate::config::agora_home().join("identity.key")
     }
 
     /// Load an existing identity from disk, or generate a new one.
@@ -163,7 +163,7 @@ impl OwnerIdentity {
     /// Default path for the owner key file.
     pub fn default_path() -> PathBuf {
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        PathBuf::from(home).join(".agora").join("owner.key")
+        crate::config::agora_home().join("owner.key")
     }
 
     /// Generate a fresh Ed25519 keypair for the owner.
@@ -276,9 +276,7 @@ pub struct OwnerAttestation {
 impl OwnerAttestation {
     /// Default path for the attestation file.
     pub fn default_path() -> PathBuf {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        PathBuf::from(home)
-            .join(".agora")
+        crate::config::agora_home()
             .join("owner_attestation.json")
     }
 

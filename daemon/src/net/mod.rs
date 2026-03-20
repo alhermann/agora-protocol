@@ -644,6 +644,7 @@ where
             did: peer_did.clone(),
             session_id: peer_session_id,
             verified: peer_verified,
+            last_seen: Some(chrono::Utc::now()),
             owner_did: peer_owner_did.clone(),
             owner_verified: peer_owner_verified,
             disconnect,
@@ -754,9 +755,24 @@ where
     // Subscribe to outbox broadcast — this peer gets its own copy of every message
     let mut outbox_rx = state.subscribe_outbox();
 
+    // Heartbeat interval — send every 30 seconds to keep connection alive
+    // and let peers track presence/liveness (CONCEPT.md §7)
+    let mut heartbeat_interval = tokio::time::interval(std::time::Duration::from_secs(30));
+    heartbeat_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
     // Message loop: receive from peer → inbox, outbox broadcast → send to peer
     loop {
         tokio::select! {
+            // Heartbeat — periodic keepalive (§7 Presence)
+            _ = heartbeat_interval.tick() => {
+                let mut hb = Message::heartbeat(&node_name);
+                if sign_and_send(&mut writer, &mut hb, state.identity()).await.is_err() {
+                    warn!("Heartbeat send failed to {}, disconnecting", peer_name);
+                    break;
+                }
+                state.update_peer_last_seen(&peer_name).await;
+            }
+
             // Local disconnect request
             _ = disconnect_signal.notified() => {
                 info!("Disconnecting {} by local request", peer_name);
@@ -810,6 +826,10 @@ where
                                         info!("Message {} acked by {}", payload.message_id, msg.from);
                                     }
                                 }
+                            }
+                            MessageType::Heartbeat => {
+                                // Peer is alive — update last_seen timestamp
+                                state.update_peer_last_seen(&peer_name).await;
                             }
                             MessageType::Close => {
                                 info!("{} disconnected gracefully.", msg.from);

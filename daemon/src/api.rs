@@ -126,6 +126,7 @@ fn api_routes() -> Router<DaemonState> {
         // GitHub integration
         .route("/projects/{id}/github/sync", post(github_sync))
         .route("/projects/{id}/github/status", get(github_status))
+        .route("/projects/{id}/github/prs", get(github_pull_requests))
         .route(
             "/github/config",
             get(get_github_config).post(set_github_config),
@@ -280,6 +281,8 @@ async fn send_message(
     State(state): State<DaemonState>,
     Json(req): Json<SendRequest>,
 ) -> Result<Json<SendResponse>, (StatusCode, Json<ErrorResponse>)> {
+    use crate::protocol::message::MessageType;
+
     // Validate message body size (max 1 MB)
     const MAX_BODY_SIZE: usize = 1_048_576;
     if req.body.len() > MAX_BODY_SIZE {
@@ -322,6 +325,10 @@ async fn send_message(
 
     let id = Uuid::new_v4();
     let reply_to = req.reply_to.and_then(|s| Uuid::parse_str(&s).ok());
+    let sender = req
+        .from
+        .clone()
+        .unwrap_or_else(|| state.node_name().to_string());
     // Use explicit conversation_id if provided, otherwise auto-assign for 1:1 DMs
     let conversation_id = req
         .conversation_id
@@ -334,6 +341,104 @@ async fn send_message(
         Some(cid) => state.project_id_for_conversation(&cid).await,
         None => None,
     };
+
+    let thread_id = match conversation_id {
+        Some(cid) if state.get_thread(&cid).await.is_some() => Some(cid),
+        _ => None,
+    };
+
+    if let Some(thread_id) = thread_id {
+        let mut targets = match state.thread_route(&thread_id, &sender).await {
+            Ok(targets) => targets,
+            Err(crate::thread::ThreadError::NotAMember) => {
+                return Err((
+                    StatusCode::FORBIDDEN,
+                    Json(ErrorResponse {
+                        error: "Sender is not a participant in this thread".to_string(),
+                    }),
+                ));
+            }
+            Err(crate::thread::ThreadError::ThreadClosed) => {
+                return Err((
+                    StatusCode::CONFLICT,
+                    Json(ErrorResponse {
+                        error: "Thread is closed".to_string(),
+                    }),
+                ));
+            }
+            Err(_) => {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse {
+                        error: "Invalid thread routing state".to_string(),
+                    }),
+                ));
+            }
+        };
+
+        if let Some(ref explicit_target) = req.to {
+            if !targets.iter().any(|target| target == explicit_target) {
+                return Err((
+                    StatusCode::FORBIDDEN,
+                    Json(ErrorResponse {
+                        error: format!(
+                            "Target '{}' is not a valid recipient for this thread",
+                            explicit_target
+                        ),
+                    }),
+                ));
+            }
+            targets.retain(|target| target == explicit_target);
+        }
+
+        state
+            .store_outbound_from(
+                &req.body,
+                req.to.as_deref(),
+                id,
+                reply_to,
+                Some(thread_id),
+                project_id,
+                req.from.as_deref(),
+            )
+            .await;
+
+        for target in targets {
+            if !state.is_peer_connected_by_name(&target).await
+                && !state.is_peer_connected_by_addr(&target).await
+            {
+                let queued = crate::outbox::QueuedMessage {
+                    id,
+                    to: target.clone(),
+                    body: req.body.clone(),
+                    msg_type: Some("thread.message".to_string()),
+                    enqueued_at: chrono::Utc::now(),
+                    reply_to,
+                    conversation_id: Some(thread_id),
+                    delivered: false,
+                };
+                state.outbox_enqueue(queued).await;
+            }
+
+            state
+                .push_outbox(OutboundMessage {
+                    body: req.body.clone(),
+                    to: Some(target),
+                    id,
+                    reply_to,
+                    conversation_id: Some(thread_id),
+                    msg_type: Some(MessageType::ThreadMessage),
+                    project_id,
+                    from_override: req.from.clone(),
+                })
+                .await;
+        }
+
+        return Ok(Json(SendResponse {
+            status: "queued".to_string(),
+            id: id.to_string(),
+        }));
+    }
 
     state
         .store_outbound_from(
@@ -365,10 +470,6 @@ async fn send_message(
         }
     }
 
-    let sender = req
-        .from
-        .clone()
-        .unwrap_or_else(|| state.node_name().to_string());
     let msg_body = req.body.clone();
     let msg_from = req.from.clone();
 
@@ -3284,6 +3385,35 @@ async fn github_status(
         "github_linked_tasks": github_tasks,
         "local_only_tasks": local_only,
     })))
+}
+
+/// GET /projects/{id}/github/prs — list open pull requests.
+async fn github_pull_requests(
+    State(state): State<DaemonState>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let project_id = Uuid::parse_str(&id).map_err(|_| {
+        (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: "Invalid project ID".to_string() }))
+    })?;
+    let project = state.get_project(&project_id).await.ok_or_else(|| {
+        (StatusCode::NOT_FOUND, Json(ErrorResponse { error: "Project not found".to_string() }))
+    })?;
+    let repo_url = project.repo.as_deref().ok_or_else(|| {
+        (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: "No repo linked".to_string() }))
+    })?;
+    let (owner, repo) = crate::github::parse_github_repo(repo_url).ok_or_else(|| {
+        (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: "Cannot parse repo URL".to_string() }))
+    })?;
+    let cfg = crate::github::GitHubConfig::load();
+    let token = cfg.token.ok_or_else(|| {
+        (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: "No GitHub token configured".to_string() }))
+    })?;
+    let prs = crate::github::fetch_pull_requests(&token, &owner, &repo)
+        .await
+        .map_err(|e| {
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e }))
+        })?;
+    Ok(Json(serde_json::json!({ "count": prs.len(), "pull_requests": prs })))
 }
 
 /// GET /github/config — get GitHub configuration.

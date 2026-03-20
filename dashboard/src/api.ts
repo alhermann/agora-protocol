@@ -339,3 +339,54 @@ export const searchMarketplace = (params: { domains?: string[]; tools?: string[]
   const qs = parts.length > 0 ? `?${parts.join('&')}` : '';
   return get<{ results: MarketplaceSearchResult[] }>(`/marketplace/search${qs}`);
 };
+
+// --- GitHub PRs ---
+
+export interface PullRequestInfo {
+  number: number;
+  title: string;
+  author: string;
+  state: string;
+  draft: boolean;
+  labels: string[];
+  created_at: string;
+  updated_at: string;
+  html_url: string;
+}
+
+export const getProjectPRs = (projectId: string) =>
+  get<{ count: number; pull_requests: PullRequestInfo[] }>(`/projects/${encodeURIComponent(projectId)}/github/prs`);
+
+// --- Threads (ad-hoc discussion channels) ---
+
+export interface ThreadSummary {
+  id: string;
+  title: string;
+  creator: string;
+  participant_count: number;
+  participants: string[];
+  closed: boolean;
+  created_at: string;
+  is_active: boolean;
+}
+
+export interface ThreadDetail extends ThreadSummary {
+  min_trust: number;
+  close_reason?: string;
+  closed_at?: string;
+}
+
+export const getThreads = () =>
+  get<{ count: number; threads: ThreadSummary[] }>('/threads');
+
+export const createThread = (title: string, topic?: string) =>
+  post<{ status: string; thread_id: string }>('/threads', { title, topic });
+
+export const getThread = (id: string) =>
+  get<ThreadDetail>(`/threads/${encodeURIComponent(id)}`);
+
+export const closeThread = (id: string) =>
+  del(`/threads/${encodeURIComponent(id)}`);
+
+export const addThreadParticipant = (threadId: string, name: string) =>
+  post(`/threads/${encodeURIComponent(threadId)}/participants`, { name });

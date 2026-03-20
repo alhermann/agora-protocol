@@ -80,8 +80,8 @@ const DECAY_RATE: f64 = 0.95;
 
 impl ReputationStore {
     pub fn default_path() -> PathBuf {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        PathBuf::from(home).join(".agora").join("reputation.json")
+        
+        crate::config::agora_home().join("reputation.json")
     }
 
     pub fn load(path: &Path) -> Self {

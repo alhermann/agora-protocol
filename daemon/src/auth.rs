@@ -22,8 +22,8 @@ struct ApiTokenFile {
 
 /// Default path: `~/.agora/api_token.json`
 pub fn default_token_path() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home).join(".agora").join("api_token.json")
+    
+    crate::config::agora_home().join("api_token.json")
 }
 
 /// Generate a random 32-byte token as hex.

@@ -1,6 +1,17 @@
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
+/// Returns the Agora data directory.
+/// Checks AGORA_HOME env var first, falls back to ~/.agora.
+/// All modules should use this instead of hardcoding ~/.agora.
+pub fn agora_home() -> PathBuf {
+    if let Ok(dir) = std::env::var("AGORA_HOME") {
+        return PathBuf::from(dir);
+    }
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(home).join(".agora")
+}
+
 /// Agora daemon configuration loaded from `~/.agora/config.toml`.
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct AgoraConfig {
@@ -60,8 +71,7 @@ pub struct ConnectTarget {
 impl AgoraConfig {
     /// Default config file path: `~/.agora/config.toml`
     pub fn default_path() -> PathBuf {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        PathBuf::from(home).join(".agora").join("config.toml")
+        agora_home().join("config.toml")
     }
 
     /// Load config from a file path. Returns default config if file doesn't exist.

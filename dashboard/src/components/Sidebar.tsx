@@ -2,8 +2,9 @@ import { useCallback, useState, useEffect } from 'react';
 import { usePolling } from '../hooks/usePolling';
 import {
   getStatus, getHealth, getPeers, getFriends, listConsumers,
-  getConversations, getProjects, getProjectRooms,
+  getConversations, getProjects, getProjectRooms, getThreads,
 } from '../api';
+import type { ThreadSummary } from '../api';
 import type {
   StatusResponse, HealthResponse, PeersResponse, ConsumersResponse,
   FriendsResponse, ConversationsResponse,
@@ -27,6 +28,13 @@ interface MergedAgent {
   role: string | null;
 }
 
+function threadSortKey(thread: ThreadSummary, convo?: ConversationSummary): number {
+  if (convo) {
+    return new Date(convo.last_message_at).getTime();
+  }
+  return new Date(thread.created_at).getTime();
+}
+
 export function Sidebar({
   selectedView,
   onSelect,
@@ -40,6 +48,7 @@ export function Sidebar({
   const fetchFriends = useCallback(() => getFriends(), []);
   const fetchConvos = useCallback(() => getConversations(), []);
   const fetchProjects = useCallback(() => getProjects(), []);
+  const fetchThreads = useCallback(() => getThreads(), []);
 
   const { data: status, error: statusErr } = usePolling<StatusResponse>(fetchStatus, 10000);
   const { data: _health } = usePolling<HealthResponse>(fetchHealth, 10000);
@@ -47,6 +56,7 @@ export function Sidebar({
   const { data: friends } = usePolling<FriendsResponse>(fetchFriends, 10000);
   const { data: convos } = usePolling<ConversationsResponse>(fetchConvos, 10000);
   const { data: projectsData } = usePolling<ProjectsResponse>(fetchProjects, 10000);
+  const { data: threadsData } = usePolling<{ count: number; threads: ThreadSummary[] }>(fetchThreads, 10000);
   const fetchConsumers = useCallback(() => listConsumers(), []);
   const { data: consumersData } = usePolling<ConsumersResponse>(fetchConsumers, 10000);
 
@@ -91,9 +101,11 @@ export function Sidebar({
     });
   });
 
+  const threadConversationIds = new Set((threadsData?.threads ?? []).map((thread) => thread.id));
+
   // Direct messages = conversations not belonging to any room
   const directMessages = convos?.conversations.filter(
-    (c) => !roomConversationIds.has(c.conversation_id)
+    (c) => !roomConversationIds.has(c.conversation_id) && !threadConversationIds.has(c.conversation_id)
   ) ?? [];
 
   // Find conversation message count for a room's conversation_id
@@ -101,6 +113,9 @@ export function Sidebar({
     const convo = convos?.conversations.find(c => c.conversation_id === conversationId);
     return convo?.message_count ?? null;
   };
+
+  const getConversationSummary = (conversationId: string): ConversationSummary | undefined =>
+    convos?.conversations.find(c => c.conversation_id === conversationId);
 
   // Build agent role map from projects
   const agentRoleMap = new Map<string, string>();
@@ -184,6 +199,13 @@ export function Sidebar({
 
   const isProjectSelected = (projectId: string) =>
     selectedView.type === 'project' && selectedView.id === projectId;
+
+  const activeThreads = ((threadsData?.threads ?? []).filter((t) => !t.closed))
+    .sort((a, b) => {
+      const aConvo = getConversationSummary(a.id);
+      const bConvo = getConversationSummary(b.id);
+      return threadSortKey(b, bConvo) - threadSortKey(a, aConvo);
+    });
 
   return (
     <aside className="sidebar">
@@ -304,6 +326,53 @@ export function Sidebar({
             Network
           </button>
         </h3>
+      </section>
+
+      {/* Threads */}
+      <div className="sidebar-divider" />
+      <section className="sidebar-section">
+        <h3 className="sidebar-heading">
+          <button
+            onClick={() => onSelect({ type: 'threads' })}
+            style={{ background: 'none', border: 'none', color: 'inherit', cursor: 'pointer', font: 'inherit', padding: 0, textTransform: 'inherit', letterSpacing: 'inherit', fontWeight: 'inherit' }}
+          >
+            Threads
+          </button>
+          <span className="sidebar-heading-actions">
+            <button
+              className="sidebar-add-btn"
+              onClick={() => onSelect({ type: 'threads' })}
+              title="Browse or create threads"
+            >
+              +
+            </button>
+          </span>
+        </h3>
+        {activeThreads.length === 0 && (
+          <div className="sidebar-empty">No active threads yet</div>
+        )}
+        {activeThreads.map((thread) => {
+          const summary = getConversationSummary(thread.id);
+          const isSelected = selectedView.type === 'thread' && selectedView.id === thread.id;
+          const title = thread.title || 'Untitled thread';
+          const preview = summary?.preview
+            ?? `${thread.participant_count} participant${thread.participant_count === 1 ? '' : 's'} • created by ${thread.creator}`;
+          const timeLabel = formatRelativeTime(summary?.last_message_at ?? thread.created_at);
+
+          return (
+            <button
+              key={thread.id}
+              className={`sidebar-dm ${isSelected ? 'selected' : ''}`}
+              onClick={() => onSelect({ type: 'thread', id: thread.id })}
+            >
+              <div className="sidebar-dm-top">
+                <span className="sidebar-dm-participants"># {title}</span>
+                <span className="sidebar-dm-time">{timeLabel}</span>
+              </div>
+              <div className="sidebar-dm-preview">{preview}</div>
+            </button>
+          );
+        })}
       </section>
 
       {/* Direct Messages — only shown if they exist */}

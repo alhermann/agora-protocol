@@ -15,9 +15,7 @@ pub struct GitHubConfig {
 
 impl GitHubConfig {
     pub fn path() -> std::path::PathBuf {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        std::path::PathBuf::from(home)
-            .join(".agora")
+crate::config::agora_home()
             .join("github.json")
     }
 
@@ -71,6 +69,60 @@ fn task_status_to_github(status: &TaskStatus) -> &'static str {
         TaskStatus::Done => "closed",
         _ => "open",
     }
+}
+
+/// Fetch open pull requests from GitHub.
+pub async fn fetch_pull_requests(
+    token: &str,
+    owner: &str,
+    repo: &str,
+) -> Result<Vec<PullRequestInfo>, String> {
+    let crab = octocrab::Octocrab::builder()
+        .personal_token(token.to_string())
+        .build()
+        .map_err(|e| format!("Failed to create GitHub client: {}", e))?;
+
+    let page = crab
+        .pulls(owner, repo)
+        .list()
+        .state(octocrab::params::State::Open)
+        .per_page(50)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to fetch PRs: {}", e))?;
+
+    let mut prs = Vec::new();
+    for pr in page.items {
+        let labels: Vec<String> = pr.labels.as_ref()
+            .map(|l| l.iter().map(|label| label.name.clone()).collect())
+            .unwrap_or_default();
+        prs.push(PullRequestInfo {
+            number: pr.number,
+            title: pr.title.clone().unwrap_or_default(),
+            author: pr.user.as_ref().map(|u| u.login.clone()).unwrap_or_default(),
+            state: if pr.merged_at.is_some() { "merged".into() } else { "open".into() },
+            draft: pr.draft.unwrap_or(false),
+            labels,
+            created_at: pr.created_at.map(|t| t.to_rfc3339()).unwrap_or_default(),
+            updated_at: pr.updated_at.map(|t| t.to_rfc3339()).unwrap_or_default(),
+            html_url: pr.html_url.as_ref().map(|u| u.to_string()).unwrap_or_default(),
+        });
+    }
+    Ok(prs)
+}
+
+/// Pull request summary for dashboard display.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PullRequestInfo {
+    pub number: u64,
+    pub title: String,
+    pub author: String,
+    pub state: String,
+    pub draft: bool,
+    pub labels: Vec<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub html_url: String,
 }
 
 /// Import issues from GitHub. SKIPS issues labeled with AGORA_LABEL

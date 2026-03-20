@@ -23,8 +23,8 @@ pub struct CryptoMeta {
 
 impl CryptoMeta {
     pub fn default_path() -> PathBuf {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        PathBuf::from(home).join(".agora").join("crypto.json")
+        
+        crate::config::agora_home().join("crypto.json")
     }
 
     pub fn load(path: &Path) -> Option<Self> {

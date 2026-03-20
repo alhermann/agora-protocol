@@ -69,8 +69,8 @@ impl OutboxStore {
 
     /// Default outbox directory: `~/.agora/outbox/`
     pub fn default_path() -> PathBuf {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        PathBuf::from(home).join(".agora").join("outbox")
+        
+        crate::config::agora_home().join("outbox")
     }
 
     fn peer_file(&self, peer: &str) -> PathBuf {

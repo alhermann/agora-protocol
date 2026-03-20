@@ -1,15 +1,17 @@
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 use tokio::process::Command;
 use tokio::sync::{Mutex, Notify};
 use tracing::{info, warn};
 
 const LISTENER_RETRY_DELAY: Duration = Duration::from_secs(2);
 const LISTENER_RECONCILE_INTERVAL: Duration = Duration::from_secs(2);
+const AGENT_BACKEND_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone)]
 pub struct ListenOptions {
@@ -36,6 +38,18 @@ enum Backend {
     OpenAi,
     Ollama,
     Custom,
+}
+
+impl Backend {
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::Codex => "codex",
+            Self::OpenAi => "openai",
+            Self::Ollama => "ollama",
+            Self::Custom => "custom",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -152,6 +166,7 @@ pub async fn listen(options: ListenOptions) -> Result<()> {
             cfg.project_dir.display()
         )
     })?;
+    validate_backend_availability(&cfg)?;
 
     let api_base = format!("http://127.0.0.1:{}", options.api_port);
     let client = reqwest::Client::builder()
@@ -559,8 +574,8 @@ impl ConversationRouteCache {
 }
 
 fn default_agent_config_path() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home).join(".agora").join("agent.toml")
+    
+    crate::config::agora_home().join("agent.toml")
 }
 
 fn parse_backend(name: &str) -> Result<Backend> {
@@ -706,18 +721,30 @@ async fn call_agent(
         joined_bodies(&batch.messages),
         options.send_as
     );
+    let backend_name = cfg.backend.name();
+    let backend_call = async {
+        match cfg.backend {
+            Backend::Claude => run_claude(&cfg.project_dir, &system_prompt, &user_prompt).await,
+            Backend::Codex => run_codex(cfg, &system_prompt, &user_prompt).await,
+            Backend::OpenAi => run_openai(client, cfg, &system_prompt, &user_prompt).await,
+            Backend::Ollama => run_ollama(client, cfg, &system_prompt, &user_prompt).await,
+            Backend::Custom => run_custom(cfg, &user_prompt).await,
+        }
+    };
 
-    match cfg.backend {
-        Backend::Claude => run_claude(&cfg.project_dir, &system_prompt, &user_prompt).await,
-        Backend::Codex => run_codex(cfg, &system_prompt, &user_prompt).await,
-        Backend::OpenAi => run_openai(client, cfg, &system_prompt, &user_prompt).await,
-        Backend::Ollama => run_ollama(client, cfg, &system_prompt, &user_prompt).await,
-        Backend::Custom => run_custom(cfg, &user_prompt).await,
+    match tokio::time::timeout(AGENT_BACKEND_TIMEOUT, backend_call).await {
+        Ok(result) => result,
+        Err(_) => bail!(
+            "{} backend timed out after {}s",
+            backend_name,
+            AGENT_BACKEND_TIMEOUT.as_secs()
+        ),
     }
 }
 
 async fn run_claude(project_dir: &Path, system_prompt: &str, user_prompt: &str) -> Result<String> {
     let mut cmd = Command::new(claude_binary());
+    cmd.kill_on_drop(true);
     cmd.arg("-p")
         .arg(user_prompt)
         .arg("--tools")
@@ -748,11 +775,13 @@ async fn run_codex(
     system_prompt: &str,
     user_prompt: &str,
 ) -> Result<String> {
+    let codex_path = resolve_codex_binary()?;
     let output_path =
         std::env::temp_dir().join(format!("agora-codex-{}.txt", uuid::Uuid::new_v4()));
     let prompt = format!("{system_prompt}\n\n{user_prompt}");
 
-    let mut cmd = Command::new(codex_binary());
+    let mut cmd = Command::new(&codex_path);
+    cmd.kill_on_drop(true);
     cmd.arg("exec")
         .arg("--dangerously-bypass-approvals-and-sandbox")
         .arg("--skip-git-repo-check")
@@ -771,7 +800,7 @@ async fn run_codex(
     let output = cmd
         .output()
         .await
-        .context("failed to launch codex backend")?;
+        .with_context(|| format!("failed to launch codex backend at {}", codex_path.display()))?;
     if !output.status.success() {
         let _ = std::fs::remove_file(&output_path);
         bail!(
@@ -863,12 +892,14 @@ async fn run_custom(cfg: &AgentRuntimeConfig, user_prompt: &str) -> Result<Strin
     #[cfg(unix)]
     let mut child = {
         let mut cmd = Command::new("sh");
+        cmd.kill_on_drop(true);
         cmd.arg("-lc").arg(command);
         cmd
     };
     #[cfg(windows)]
     let mut child = {
         let mut cmd = Command::new("cmd");
+        cmd.kill_on_drop(true);
         cmd.arg("/C").arg(command);
         cmd
     };
@@ -912,8 +943,117 @@ fn claude_binary() -> PathBuf {
     }
 }
 
-fn codex_binary() -> PathBuf {
-    PathBuf::from("codex")
+fn validate_backend_availability(cfg: &AgentRuntimeConfig) -> Result<()> {
+    if matches!(cfg.backend, Backend::Codex) {
+        let codex = resolve_codex_binary()?;
+        info!("Resolved codex backend binary to {}", codex.display());
+    }
+    Ok(())
+}
+
+fn is_executable_candidate(path: &Path) -> bool {
+    path.is_file()
+}
+
+fn find_binary_in_path(binary: &str, path_value: &OsStr) -> Option<PathBuf> {
+    std::env::split_paths(path_value)
+        .map(|dir| dir.join(binary))
+        .find(|path| is_executable_candidate(path))
+}
+
+fn sort_paths_by_recency(paths: &mut [PathBuf]) {
+    paths.sort_by(|a, b| {
+        let a_time = std::fs::metadata(a)
+            .and_then(|meta| meta.modified())
+            .unwrap_or(SystemTime::UNIX_EPOCH);
+        let b_time = std::fs::metadata(b)
+            .and_then(|meta| meta.modified())
+            .unwrap_or(SystemTime::UNIX_EPOCH);
+        b_time
+            .cmp(&a_time)
+            .then_with(|| b.as_os_str().cmp(a.as_os_str()))
+    });
+}
+
+fn vscode_codex_candidates(home: &Path) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    for extensions_dir in [
+        home.join(".vscode").join("extensions"),
+        home.join(".cursor").join("extensions"),
+    ] {
+        let Ok(entries) = std::fs::read_dir(&extensions_dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let ext_name = entry.file_name();
+            if !ext_name.to_string_lossy().starts_with("openai.chatgpt-") {
+                continue;
+            }
+            let bin_root = entry.path().join("bin");
+            let Ok(platform_dirs) = std::fs::read_dir(&bin_root) else {
+                continue;
+            };
+            for platform_dir in platform_dirs.flatten() {
+                let candidate = platform_dir.path().join("codex");
+                if is_executable_candidate(&candidate) {
+                    candidates.push(candidate);
+                }
+            }
+        }
+    }
+    sort_paths_by_recency(&mut candidates);
+    candidates
+}
+
+fn resolve_codex_binary_with(
+    path_value: Option<&OsStr>,
+    home: Option<&Path>,
+    env_override: Option<PathBuf>,
+) -> Result<PathBuf> {
+    if let Some(path) = env_override {
+        if is_executable_candidate(&path) {
+            return Ok(path);
+        }
+        bail!(
+            "AGORA_CODEX_BINARY points to {}, but it does not exist or is not a file",
+            path.display()
+        );
+    }
+
+    if let Some(path_value) = path_value {
+        if let Some(found) = find_binary_in_path("codex", path_value) {
+            return Ok(found);
+        }
+    }
+
+    let mut candidates = Vec::new();
+    if let Some(home) = home {
+        candidates.push(home.join(".local").join("bin").join("codex"));
+        candidates.extend(vscode_codex_candidates(home));
+    }
+    candidates.push(PathBuf::from("/opt/homebrew/bin/codex"));
+    candidates.push(PathBuf::from("/usr/local/bin/codex"));
+
+    let mut seen = HashSet::new();
+    for candidate in candidates {
+        if !seen.insert(candidate.clone()) {
+            continue;
+        }
+        if is_executable_candidate(&candidate) {
+            return Ok(candidate);
+        }
+    }
+
+    bail!(
+        "could not find codex binary for listener backend. Set AGORA_CODEX_BINARY, add codex to PATH, or install the OpenAI VS Code extension binary"
+    );
+}
+
+fn resolve_codex_binary() -> Result<PathBuf> {
+    let env_override = std::env::var_os("AGORA_CODEX_BINARY").map(PathBuf::from);
+    let path_value = std::env::var_os("PATH");
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    resolve_codex_binary_with(path_value.as_deref(), home.as_deref(), env_override)
 }
 
 fn joined_bodies(messages: &[InboxMessage]) -> String {
@@ -1124,6 +1264,60 @@ mod tests {
     #[test]
     fn parse_backend_supports_codex() {
         assert!(matches!(parse_backend("codex"), Ok(Backend::Codex)));
+    }
+
+    #[test]
+    fn find_binary_in_path_returns_existing_executable() {
+        let temp = tempfile::tempdir().unwrap();
+        let bin_dir = temp.path().join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let codex = bin_dir.join("codex");
+        std::fs::write(&codex, "#!/bin/sh\n").unwrap();
+
+        let found = find_binary_in_path("codex", OsStr::new(bin_dir.to_str().unwrap()));
+        assert_eq!(found.as_deref(), Some(codex.as_path()));
+    }
+
+    #[test]
+    fn vscode_codex_candidates_discovers_extension_binary() {
+        let temp = tempfile::tempdir().unwrap();
+        let codex = temp
+            .path()
+            .join(".vscode")
+            .join("extensions")
+            .join("openai.chatgpt-26.318.11754-darwin-arm64")
+            .join("bin")
+            .join("macos-aarch64")
+            .join("codex");
+        std::fs::create_dir_all(codex.parent().unwrap()).unwrap();
+        std::fs::write(&codex, "#!/bin/sh\n").unwrap();
+
+        let candidates = vscode_codex_candidates(temp.path());
+        assert!(candidates.contains(&codex));
+    }
+
+    #[test]
+    fn resolve_codex_binary_uses_vscode_fallback_when_path_is_missing() {
+        let temp = tempfile::tempdir().unwrap();
+        let codex = temp
+            .path()
+            .join(".vscode")
+            .join("extensions")
+            .join("openai.chatgpt-26.318.11754-darwin-arm64")
+            .join("bin")
+            .join("macos-aarch64")
+            .join("codex");
+        std::fs::create_dir_all(codex.parent().unwrap()).unwrap();
+        std::fs::write(&codex, "#!/bin/sh\n").unwrap();
+
+        let resolved = resolve_codex_binary_with(
+            Some(OsStr::new("/usr/bin:/bin")),
+            Some(temp.path()),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(resolved, codex);
     }
 
     #[derive(Clone)]
