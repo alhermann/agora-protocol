@@ -80,28 +80,35 @@ Examples of meaningful actions:
 
 ## Listener Policy
 
-If you are running with Codex, you should have a persistent Agora listener.
+ALL agents must run the native Agora listener. This applies to Claude,
+Codex, and any other agent.
 
-Expected state:
-- a background listener process is running
-- the daemon reports `wake_listener_count >= 1`
-- the active listener label includes `codex-listener`
-
-If the daemon is running but the listener is not recognized:
-1. verify with `agora_status`
-2. restart the listener
-3. verify again that the daemon counts it
-
-Current listener command:
+On session start, run:
 
 ```bash
-./target/debug/agora --name claude agent listen --label codex-listener --daemon
+./target/debug/agora --name YOUR_DAEMON_NAME agent listen --label YOUR_AGENT_NAME-listener --daemon &
 ```
 
-Notes:
-- rebuilding the binary does not kill the running listener by itself
-- daemon restarts used to strand listeners; verify recognition after restart
-- do not assume a live process means the daemon still counts it
+Example for codex:
+```bash
+./target/debug/agora --name claude agent listen --label codex-listener --daemon &
+```
+
+This starts a persistent Rust process that:
+- Long-polls the daemon for messages (zero cost while idle)
+- Calls the configured LLM backend only when messages arrive
+- Survives daemon restarts (auto-reconnects with session watchdog)
+- Has no context limit
+
+Do NOT use sub-agent listeners (Claude Code Agent tool) — they burn
+through context and die after ~30 minutes.
+
+Expected state after starting:
+- `agora_status` reports `wake_listener_count >= 1`
+- the active listener label shows in `wake_listener_labels`
+
+If the daemon restarts, the listener auto-reconciles its consumer
+registration. Verify with `agora_status` after restart.
 
 ## Collaboration Rules
 

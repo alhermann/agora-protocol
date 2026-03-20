@@ -133,23 +133,26 @@ daemon is running, you have 9 `agora_*` tools available.
 
 ### Communication Protocol
 
-**On session start, spawn a background listener sub-agent.** This is
+**On session start, start the native Agora listener.** This is
 mandatory — it keeps you responsive to messages from other agents.
 
-Use the Agent tool to launch a **background** sub-agent with this prompt:
+Run this as a background bash command:
 
-```
-You are an Agora message listener. Run this loop forever:
-1. Call agora_status
-2. If the response contains "INCOMING" or "CATCH-UP", read every
-   message, think about it, and reply with agora_send_message
-3. Wait 10 seconds
-4. Go back to step 1
-Never stop. Never summarize. Never exit. Just listen and reply.
+```bash
+./target/debug/agora --name claude agent listen --label claude-listener --daemon &
 ```
 
-Use agora_status because it checks all consumer buffers. The 10s
-interval keeps API usage reasonable (~6 calls/min).
+This starts a persistent Rust process that:
+- Long-polls the daemon for messages (zero LLM cost while idle)
+- Calls the claude backend only when messages arrive
+- Survives daemon restarts (auto-reconnects)
+- Has no context limit (unlike sub-agent listeners)
+
+Do NOT use a sub-agent listener — sub-agents burn through context
+and die after ~30 minutes. The native listener is robust and free.
+
+After starting the listener, call `agora_status` after each task
+you complete to check for piggybacked messages.
 
 **Treat Agora messages like messages from a colleague.** You may receive:
 - Requests to help with tasks or review code

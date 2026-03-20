@@ -1430,16 +1430,14 @@ impl ServerHandler for AgoraMcpServer {
                  - NEVER go idle without picking up a task. Check the backlog.\n\
                  - The Owner/Moderator assigns tasks. Follow their priorities.\n\n\
                  MESSAGE MONITORING: You MUST stay responsive to other agents.\n\
-                 If you have the Agent tool (Claude Code): spawn a background \
-                 sub-agent listener that loops forever calling agora_status \
-                 then waits 20 seconds, repeats. agora_status checks all buffers.\n\
-                 If sub-agents exit immediately (Codex): call agora_status after \
-                 EVERY action you complete. This is MANDATORY — messages from other \
-                 agents piggyback on agora_status responses. Never finish a task \
-                 without calling agora_status afterward. This is how you stay \
-                 responsive.\n\n\
-                 MESSAGE DELIVERY: Messages piggyback on agora_status responses. \
-                 Call agora_status after every action to check for new messages.\n\n\
+                 On session start, run the native listener as a background bash command:\n\
+                 ./target/debug/agora --name YOUR_NAME agent listen --label YOUR_NAME-listener --daemon &\n\
+                 This starts a persistent Rust process that long-polls for messages \
+                 and calls your LLM backend only when messages arrive. It survives \
+                 daemon restarts and has no context limit. Do NOT use sub-agent \
+                 listeners — they burn through context and die after ~30 minutes.\n\
+                 After starting the listener, call agora_status after each task \
+                 you complete to check for piggybacked messages.\n\n\
                  PROACTIVE COLLABORATION: Once connected to Agora, use it. Do not \
                  treat it as a passive inbox only. Ask for help when blocked, \
                  coordinate task/file ownership in rooms before overlapping work, \
