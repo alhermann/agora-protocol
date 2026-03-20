@@ -133,38 +133,12 @@ fn api_routes() -> Router<DaemonState> {
         )
         // Outbox stats
         .route("/outbox", get(get_outbox_stats))
-        // Marketplace
-        .route("/marketplace/search", get(marketplace_search))
-        .route("/marketplace/advertise", post(marketplace_advertise))
-        .route("/marketplace/agents", get(marketplace_list))
         // Discovery (gossip network)
         .route("/discovery/agents", get(discovery_list_agents))
         .route("/discovery/search", get(discovery_search))
         .route("/discovery/agent/{did}", get(discovery_get_agent))
         .route("/discovery/projects", get(discovery_list_project_ads))
         .route("/discovery/stats", get(discovery_stats))
-        // Reputation
-        .route("/friends/{name}/reputation", get(get_reputation))
-        .route("/reputation/leaderboard", get(reputation_leaderboard))
-        .route(
-            "/reputation/recommendations",
-            get(reputation_recommendations),
-        )
-        // Coordinator
-        .route(
-            "/projects/{id}/coordinator/suggestions",
-            get(coordinator_suggestions),
-        )
-        .route("/projects/{id}/coordinator/act", post(coordinator_act))
-        .route(
-            "/projects/{id}/coordinator/digest",
-            post(coordinator_digest),
-        )
-        .route(
-            "/projects/{id}/coordinator/digests",
-            get(coordinator_digests),
-        )
-        .route("/projects/{id}/coordinator/status", get(coordinator_status))
         // Auth
         .route("/auth/verify", post(verify_token))
         .route("/auth/token", get(get_api_token))
@@ -3459,31 +3433,6 @@ async fn get_outbox_stats(State(state): State<DaemonState>) -> Json<serde_json::
 }
 
 // ---------------------------------------------------------------------------
-// Marketplace endpoints
-// ---------------------------------------------------------------------------
-
-async fn marketplace_search(
-    State(state): State<DaemonState>,
-    Query(params): Query<crate::marketplace::AgentSearchQuery>,
-) -> Json<Vec<crate::marketplace::AgentSearchResult>> {
-    Json(state.marketplace_search(&params).await)
-}
-
-async fn marketplace_advertise(
-    State(state): State<DaemonState>,
-    Json(caps): Json<crate::marketplace::AgentCapabilities>,
-) -> Json<serde_json::Value> {
-    let updated = state.marketplace_upsert(caps).await;
-    Json(serde_json::json!({ "status": "ok", "updated": updated }))
-}
-
-async fn marketplace_list(
-    State(state): State<DaemonState>,
-) -> Json<Vec<crate::marketplace::AgentCapabilities>> {
-    Json(state.marketplace_list().await)
-}
-
-// ---------------------------------------------------------------------------
 // Discovery endpoints (gossip network)
 // ---------------------------------------------------------------------------
 
@@ -3504,9 +3453,9 @@ async fn discovery_list_agents(State(state): State<DaemonState>) -> Json<serde_j
                 "domains": a.capabilities.as_ref().map(|c| &c.domains).cloned().unwrap_or_default(),
                 "tools": a.capabilities.as_ref().map(|c| &c.tools).cloned().unwrap_or_default(),
                 "availability": a.capabilities.as_ref().map(|c| match c.availability {
-                    crate::marketplace::AgentAvailability::Available => "available",
-                    crate::marketplace::AgentAvailability::Busy => "busy",
-                    crate::marketplace::AgentAvailability::Offline => "offline",
+                    crate::discovery::AgentAvailability::Available => "available",
+                    crate::discovery::AgentAvailability::Busy => "busy",
+                    crate::discovery::AgentAvailability::Offline => "offline",
                 }).unwrap_or("unknown"),
                 "description": a.capabilities.as_ref().and_then(|c| c.description.clone()),
                 "effective_trust": a.effective_trust,
@@ -3588,159 +3537,6 @@ async fn discovery_stats(
     Json(state.discovery_stats().await)
 }
 
-// ---------------------------------------------------------------------------
-// Reputation endpoints
-// ---------------------------------------------------------------------------
-
-async fn get_reputation(
-    State(state): State<DaemonState>,
-    Path(name): Path<String>,
-) -> Json<crate::reputation::AgentReputation> {
-    Json(state.reputation_get(&name).await)
-}
-
-async fn reputation_leaderboard(
-    State(state): State<DaemonState>,
-) -> Json<Vec<crate::reputation::AgentReputation>> {
-    Json(state.reputation_leaderboard().await)
-}
-
-async fn reputation_recommendations(
-    State(state): State<DaemonState>,
-) -> Json<Vec<crate::reputation::TrustRecommendation>> {
-    Json(state.reputation_recommendations().await)
-}
-
-// ---------------------------------------------------------------------------
-// Coordinator endpoints
-// ---------------------------------------------------------------------------
-
-async fn coordinator_suggestions(
-    State(state): State<DaemonState>,
-    Path(id): Path<Uuid>,
-) -> Json<Vec<crate::coordinator::CoordinatorSuggestion>> {
-    // Run coordinator analysis on the project
-    let projects = state.get_projects().await;
-    if let Some(project) = projects.iter().find(|p| p.id == id) {
-        let stage_name = project
-            .current_stage
-            .as_ref()
-            .map(|s| s.name().to_lowercase())
-            .unwrap_or_else(|| "investigation".to_string());
-        let snapshot = crate::coordinator::ProjectSnapshot {
-            id: project.id,
-            name: project.name.clone(),
-            stage: stage_name,
-            agents: project
-                .agents
-                .iter()
-                .map(|a| crate::coordinator::AgentSnapshot {
-                    name: a.name.clone(),
-                    role: a.role.name().to_lowercase(),
-                    clocked_in: a.clocked_in,
-                })
-                .collect(),
-            tasks: project
-                .tasks
-                .iter()
-                .map(|t| {
-                    let status = match t.status {
-                        crate::project::TaskStatus::Todo => "todo",
-                        crate::project::TaskStatus::InProgress => "in_progress",
-                        crate::project::TaskStatus::Done => "done",
-                        crate::project::TaskStatus::Blocked => "blocked",
-                    };
-                    crate::coordinator::TaskSnapshot {
-                        id: t.id,
-                        title: t.title.clone(),
-                        status: status.to_string(),
-                        assignee: t.assignee.clone(),
-                        depends_on: t.depends_on.clone(),
-                    }
-                })
-                .collect(),
-        };
-        let config = crate::coordinator::CoordinatorConfig::default();
-        let suggestions = crate::coordinator::analyze_project(&snapshot, &config);
-        if !suggestions.is_empty() {
-            state.coordinator_add_suggestions(id, suggestions).await;
-        }
-    }
-    Json(state.coordinator_suggestions(&id).await)
-}
-
-#[derive(Deserialize)]
-struct CoordinatorActRequest {
-    suggestion_id: Uuid,
-}
-
-async fn coordinator_act(
-    State(state): State<DaemonState>,
-    Path(id): Path<Uuid>,
-    Json(req): Json<CoordinatorActRequest>,
-) -> Json<serde_json::Value> {
-    let acted = state.coordinator_act(&id, &req.suggestion_id).await;
-    Json(serde_json::json!({ "status": if acted { "ok" } else { "not_found" } }))
-}
-
-async fn coordinator_digest(
-    State(state): State<DaemonState>,
-    Path(id): Path<Uuid>,
-) -> Json<serde_json::Value> {
-    let projects = state.get_projects().await;
-    if let Some(project) = projects.iter().find(|p| p.id == id) {
-        let digest = crate::coordinator::generate_digest(
-            id,
-            &project.name,
-            chrono::Utc::now() - chrono::Duration::hours(24),
-            project
-                .tasks
-                .iter()
-                .filter(|t| matches!(t.status, crate::project::TaskStatus::Done))
-                .map(|t| t.title.clone())
-                .collect(),
-            project.tasks.iter().map(|t| t.title.clone()).collect(),
-            project
-                .tasks
-                .iter()
-                .filter(|t| matches!(t.status, crate::project::TaskStatus::Blocked))
-                .map(|t| t.title.clone())
-                .collect(),
-            project
-                .agents
-                .iter()
-                .filter(|a| a.clocked_in)
-                .map(|a| a.name.clone())
-                .collect(),
-            vec![],
-        );
-        state.coordinator_add_digest(id, digest.clone()).await;
-        Json(serde_json::json!({ "status": "ok", "digest": digest }))
-    } else {
-        Json(serde_json::json!({ "status": "not_found" }))
-    }
-}
-
-async fn coordinator_digests(
-    State(state): State<DaemonState>,
-    Path(id): Path<Uuid>,
-) -> Json<Vec<crate::coordinator::ProjectDigest>> {
-    Json(state.coordinator_digests(&id).await)
-}
-
-async fn coordinator_status(
-    State(state): State<DaemonState>,
-    Path(id): Path<Uuid>,
-) -> Json<serde_json::Value> {
-    let suggestions = state.coordinator_suggestions(&id).await;
-    let digests = state.coordinator_digests(&id).await;
-    Json(serde_json::json!({
-        "project_id": id,
-        "total_suggestions": suggestions.len(),
-        "pending_suggestions": suggestions.iter().filter(|s| !s.acted_on).count(),
-        "total_digests": digests.len(),
-    }))
-}
 
 // ---------------------------------------------------------------------------
 // Project Rooms endpoints

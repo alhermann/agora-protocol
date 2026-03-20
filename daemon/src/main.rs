@@ -2,20 +2,17 @@ mod api;
 mod auth;
 mod child_agent;
 mod config;
-mod coordinator;
 mod crypto;
 mod dashboard;
 mod discovery;
 mod format;
 mod github;
 mod identity;
-mod marketplace;
 mod mcp;
 mod net;
 mod outbox;
 mod project;
 mod protocol;
-mod reputation;
 mod state;
 mod thread;
 
@@ -167,24 +164,6 @@ enum Commands {
     Owner {
         #[command(subcommand)]
         action: OwnerAction,
-    },
-
-    /// Agent marketplace — discover and advertise capabilities
-    Marketplace {
-        #[command(subcommand)]
-        action: MarketplaceAction,
-    },
-
-    /// Reputation system — view agent scores and trust recommendations
-    Reputation {
-        #[command(subcommand)]
-        action: ReputationAction,
-    },
-
-    /// Coordinator — view project coordination suggestions and digests
-    Coordinator {
-        #[command(subcommand)]
-        action: CoordinatorAction,
     },
 
     /// Manage API authentication token
@@ -418,68 +397,6 @@ enum ProjectAction {
     },
     /// Show GitHub integration status
     GithubStatus {
-        /// Project ID
-        project_id: String,
-    },
-}
-
-#[derive(Subcommand)]
-enum MarketplaceAction {
-    /// Search for agents by capability
-    Search {
-        /// Free-text search query
-        #[arg(long)]
-        query: Option<String>,
-        /// Filter by domain (can specify multiple)
-        #[arg(long)]
-        domain: Option<Vec<String>>,
-        /// Filter by tool
-        #[arg(long)]
-        tool: Option<Vec<String>>,
-    },
-    /// Advertise this agent's capabilities
-    Advertise {
-        /// Domains of expertise (comma-separated)
-        #[arg(long)]
-        domains: String,
-        /// Tools offered (comma-separated)
-        #[arg(long, default_value = "")]
-        tools: String,
-        /// Description
-        #[arg(long)]
-        description: Option<String>,
-    },
-    /// List all known agents
-    List,
-}
-
-#[derive(Subcommand)]
-enum ReputationAction {
-    /// Show reputation for a specific agent
-    Show {
-        /// Agent name
-        name: String,
-    },
-    /// Show reputation leaderboard
-    Leaderboard,
-    /// Show trust upgrade recommendations
-    Recommendations,
-}
-
-#[derive(Subcommand)]
-enum CoordinatorAction {
-    /// Show coordinator status for a project
-    Status {
-        /// Project ID
-        project_id: String,
-    },
-    /// Show suggestions for a project
-    Suggestions {
-        /// Project ID
-        project_id: String,
-    },
-    /// Generate a digest for a project
-    Digest {
         /// Project ID
         project_id: String,
     },
@@ -2711,261 +2628,6 @@ async fn main() -> anyhow::Result<()> {
                         }
                         Err(e) => {
                             eprintln!("Failed to get GitHub status: {}", e);
-                            std::process::exit(1);
-                        }
-                    }
-                }
-            }
-        }
-
-        Commands::Marketplace { action } => {
-            let api_base = "http://127.0.0.1:7313";
-            let client = reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(5))
-                .build()
-                .unwrap();
-            match action {
-                MarketplaceAction::Search {
-                    query,
-                    domain,
-                    tool,
-                } => {
-                    let mut params = Vec::new();
-                    if let Some(ref q) = query {
-                        params.push(format!("query={}", q));
-                    }
-                    if let Some(ref domains) = domain {
-                        for d in domains {
-                            params.push(format!("domains={}", d));
-                        }
-                    }
-                    if let Some(ref tools) = tool {
-                        for t in tools {
-                            params.push(format!("tools={}", t));
-                        }
-                    }
-                    let url = if params.is_empty() {
-                        format!("{}/marketplace/search", api_base)
-                    } else {
-                        format!("{}/marketplace/search?{}", api_base, params.join("&"))
-                    };
-                    match client.get(&url).send().await {
-                        Ok(resp) if resp.status().is_success() => {
-                            let data: serde_json::Value = resp.json().await.unwrap_or_default();
-                            println!(
-                                "{}",
-                                serde_json::to_string_pretty(&data).unwrap_or_default()
-                            );
-                        }
-                        _ => {
-                            eprintln!("Failed. Is daemon running?");
-                            std::process::exit(1);
-                        }
-                    }
-                }
-                MarketplaceAction::Advertise {
-                    domains,
-                    tools,
-                    description,
-                } => {
-                    let payload = serde_json::json!({
-                        "agent_name": cli.name,
-                        "domains": domains.split(',').map(|s| s.trim()).collect::<Vec<_>>(),
-                        "tools": tools.split(',').filter(|s| !s.trim().is_empty()).map(|s| s.trim()).collect::<Vec<_>>(),
-                        "description": description,
-                        "updated_at": chrono::Utc::now(),
-                    });
-                    match client
-                        .post(format!("{}/marketplace/advertise", api_base))
-                        .json(&payload)
-                        .send()
-                        .await
-                    {
-                        Ok(resp) if resp.status().is_success() => {
-                            println!("  {} Capabilities advertised", format::green("✓"));
-                        }
-                        _ => {
-                            eprintln!("Failed. Is daemon running?");
-                            std::process::exit(1);
-                        }
-                    }
-                }
-                MarketplaceAction::List => {
-                    match client
-                        .get(format!("{}/marketplace/agents", api_base))
-                        .send()
-                        .await
-                    {
-                        Ok(resp) if resp.status().is_success() => {
-                            let data: serde_json::Value = resp.json().await.unwrap_or_default();
-                            println!(
-                                "{}",
-                                serde_json::to_string_pretty(&data).unwrap_or_default()
-                            );
-                        }
-                        _ => {
-                            eprintln!("Failed. Is daemon running?");
-                            std::process::exit(1);
-                        }
-                    }
-                }
-            }
-        }
-
-        Commands::Reputation { action } => {
-            let api_base = "http://127.0.0.1:7313";
-            let client = reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(5))
-                .build()
-                .unwrap();
-            match action {
-                ReputationAction::Show { name } => {
-                    match client
-                        .get(format!("{}/friends/{}/reputation", api_base, name))
-                        .send()
-                        .await
-                    {
-                        Ok(resp) if resp.status().is_success() => {
-                            let data: serde_json::Value = resp.json().await.unwrap_or_default();
-                            if cli.format == "json" {
-                                println!(
-                                    "{}",
-                                    serde_json::to_string_pretty(&data).unwrap_or_default()
-                                );
-                            } else {
-                                let score =
-                                    data.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                                let count = data
-                                    .get("contribution_count")
-                                    .and_then(|v| v.as_u64())
-                                    .unwrap_or(0);
-                                let trust = data.get("recommended_trust").and_then(|v| v.as_u64());
-                                println!();
-                                format::print_kv("Agent", &name);
-                                format::print_kv("Score", &format!("{:.1}", score));
-                                format::print_kv("Contributions", &count.to_string());
-                                if let Some(t) = trust {
-                                    format::print_kv("Recommended Trust", &t.to_string());
-                                }
-                                println!();
-                            }
-                        }
-                        _ => {
-                            eprintln!("Failed. Is daemon running?");
-                            std::process::exit(1);
-                        }
-                    }
-                }
-                ReputationAction::Leaderboard => {
-                    match client
-                        .get(format!("{}/reputation/leaderboard", api_base))
-                        .send()
-                        .await
-                    {
-                        Ok(resp) if resp.status().is_success() => {
-                            let data: serde_json::Value = resp.json().await.unwrap_or_default();
-                            println!(
-                                "{}",
-                                serde_json::to_string_pretty(&data).unwrap_or_default()
-                            );
-                        }
-                        _ => {
-                            eprintln!("Failed. Is daemon running?");
-                            std::process::exit(1);
-                        }
-                    }
-                }
-                ReputationAction::Recommendations => {
-                    match client
-                        .get(format!("{}/reputation/recommendations", api_base))
-                        .send()
-                        .await
-                    {
-                        Ok(resp) if resp.status().is_success() => {
-                            let data: serde_json::Value = resp.json().await.unwrap_or_default();
-                            println!(
-                                "{}",
-                                serde_json::to_string_pretty(&data).unwrap_or_default()
-                            );
-                        }
-                        _ => {
-                            eprintln!("Failed. Is daemon running?");
-                            std::process::exit(1);
-                        }
-                    }
-                }
-            }
-        }
-
-        Commands::Coordinator { action } => {
-            let api_base = "http://127.0.0.1:7313";
-            let client = reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(5))
-                .build()
-                .unwrap();
-            match action {
-                CoordinatorAction::Status { project_id } => {
-                    match client
-                        .get(format!(
-                            "{}/projects/{}/coordinator/status",
-                            api_base, project_id
-                        ))
-                        .send()
-                        .await
-                    {
-                        Ok(resp) if resp.status().is_success() => {
-                            let data: serde_json::Value = resp.json().await.unwrap_or_default();
-                            println!(
-                                "{}",
-                                serde_json::to_string_pretty(&data).unwrap_or_default()
-                            );
-                        }
-                        _ => {
-                            eprintln!("Failed. Is daemon running?");
-                            std::process::exit(1);
-                        }
-                    }
-                }
-                CoordinatorAction::Suggestions { project_id } => {
-                    match client
-                        .get(format!(
-                            "{}/projects/{}/coordinator/suggestions",
-                            api_base, project_id
-                        ))
-                        .send()
-                        .await
-                    {
-                        Ok(resp) if resp.status().is_success() => {
-                            let data: serde_json::Value = resp.json().await.unwrap_or_default();
-                            println!(
-                                "{}",
-                                serde_json::to_string_pretty(&data).unwrap_or_default()
-                            );
-                        }
-                        _ => {
-                            eprintln!("Failed. Is daemon running?");
-                            std::process::exit(1);
-                        }
-                    }
-                }
-                CoordinatorAction::Digest { project_id } => {
-                    match client
-                        .post(format!(
-                            "{}/projects/{}/coordinator/digest",
-                            api_base, project_id
-                        ))
-                        .send()
-                        .await
-                    {
-                        Ok(resp) if resp.status().is_success() => {
-                            let data: serde_json::Value = resp.json().await.unwrap_or_default();
-                            println!(
-                                "{}",
-                                serde_json::to_string_pretty(&data).unwrap_or_default()
-                            );
-                        }
-                        _ => {
-                            eprintln!("Failed. Is daemon running?");
                             std::process::exit(1);
                         }
                     }

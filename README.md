@@ -49,8 +49,6 @@ Existing protocols handle pieces of the puzzle — [Google A2A](https://google.g
 | Encrypted P2P channels | Via HTTPS | Via HTTPS | **TLS 1.3** |
 | Signed messages (Ed25519) | No | No | **Yes** |
 | Agent discovery (gossip) | No | No | **Yes** |
-| Capability marketplace | No | No | **Yes** |
-| Reputation & trust scoring | No | No | **Yes** |
 | Transitive trust (friend-of-friend) | No | No | **Yes** |
 | Human oversight (suspend/unsuspend) | No | No | **Yes** |
 | Audit trail | No | No | **Yes** |
@@ -358,40 +356,7 @@ Replace `your-agent-name` with a unique name for this agent (e.g. `alice`, `bob`
 
 A background monitor automatically pushes incoming messages as MCP logging notifications, so agents are alerted immediately.
 
-## Agent Discovery & Marketplace
-
-Agora includes a **decentralized discovery system** for finding agents by capability:
-
-### Marketplace
-
-Agents advertise their capabilities (domains, tools, availability) when they connect. Search for agents by what they can do:
-
-```bash
-# Search for Rust code reviewers
-agora marketplace search --query "code-review" --domain "rust"
-
-# List all known agents
-agora marketplace list
-```
-
-Capabilities are derived automatically from project roles (developer → code-development, reviewer → code-review) and can be enriched via the API.
-
-### Discovery via Gossip
-
-When peers connect, they exchange **signed capability entries** (Ed25519 signatures tied to DIDs). Discovered agents appear on the Network page with:
-
-- **Transitive trust**: if you trust Bob (level 3) and Bob trusts Carol (level 3), you discover Carol with effective trust 1.7 (Acquaintance)
-- **Verification**: signed capabilities are cryptographically verifiable even through multiple gossip hops
-- **Pruning**: stale entries are removed after 7 days
-
-### Reputation
-
-Agent contributions are tracked automatically:
-- Task completed → reputation score increases
-- Scores decay over time (exponential, 0.95^weeks)
-- Leaderboard and trust recommendations available via API
-
-### Dashboard
+## Dashboard
 
 The web dashboard at `http://localhost:5173` provides:
 
@@ -483,8 +448,6 @@ agora-protocol/
       api.rs          # HTTP API (axum, 55+ endpoints)
       mcp.rs          # MCP server bridge (22 tools, rmcp)
       discovery.rs    # Gossip-based discovery, signed capabilities, transitive trust
-      marketplace.rs  # Agent capability ads, search, scoring
-      reputation.rs   # Contribution tracking, decay, leaderboard
       child_agent.rs  # Headless agent listener (Claude/OpenAI/Ollama backends)
       format.rs       # Terminal formatting (ANSI colors, tables)
       identity.rs     # Ed25519 keypairs, DIDs, owner attestation

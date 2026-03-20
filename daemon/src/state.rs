@@ -764,18 +764,8 @@ struct Inner {
     project_invitations: Mutex<crate::project::ProjectInvitationStore>,
     /// Offline message queue for store-and-forward delivery.
     outbox_store: Mutex<crate::outbox::OutboxStore>,
-    /// Agent marketplace for capability-based discovery.
-    marketplace: Mutex<crate::marketplace::MarketplaceStore>,
     /// Gossip-based network discovery store.
     discovery: Mutex<crate::discovery::DiscoveryStore>,
-    /// Reputation tracking for agent contributions.
-    reputation: Mutex<crate::reputation::ReputationStore>,
-    /// Coordinator suggestions per project.
-    coordinator_suggestions:
-        Mutex<std::collections::HashMap<Uuid, Vec<crate::coordinator::CoordinatorSuggestion>>>,
-    /// Coordinator digests per project.
-    coordinator_digests:
-        Mutex<std::collections::HashMap<Uuid, Vec<crate::coordinator::ProjectDigest>>>,
     /// API authentication token for dashboard access.
     api_token: String,
 }
@@ -948,14 +938,6 @@ impl DaemonState {
                 discovery: Mutex::new(crate::discovery::DiscoveryStore::load(
                     &crate::discovery::DiscoveryStore::default_path(),
                 )),
-                marketplace: Mutex::new(crate::marketplace::MarketplaceStore::load(
-                    &crate::marketplace::MarketplaceStore::default_path(),
-                )),
-                reputation: Mutex::new(crate::reputation::ReputationStore::load(
-                    &crate::reputation::ReputationStore::default_path(),
-                )),
-                coordinator_suggestions: Mutex::new(std::collections::HashMap::new()),
-                coordinator_digests: Mutex::new(std::collections::HashMap::new()),
                 api_token: crate::auth::load_or_create_token(&crate::auth::default_token_path()),
             }),
         };
@@ -1177,8 +1159,6 @@ impl DaemonState {
         let id = self.register_consumer_inner(label, false).await;
         // Auto-clock-in: if this agent is a member of any project, clock them in
         self.auto_clock_in_agent(label).await;
-        // Auto-advertise in marketplace: register this agent as available
-        self.auto_advertise_agent(label).await;
         id
     }
 
@@ -2665,105 +2645,6 @@ crate::config::agora_home()
         }
     }
 
-    /// Auto-advertise agent in marketplace based on project roles.
-    /// Skips if agent already has a richer manually-set profile.
-    async fn auto_advertise_agent(&self, agent_name: &str) {
-        // Skip internal consumers
-        if agent_name == "http-default" || agent_name.ends_with("-listener") {
-            return;
-        }
-        // Skip if agent already has marketplace entry with description (manual/richer)
-        if let Some(existing) = self.marketplace_get(agent_name).await {
-            if existing.description.is_some() || existing.tools.len() > 2 {
-                info!(
-                    "Skipping auto-advertise for '{}' — has richer profile",
-                    agent_name
-                );
-                return;
-            }
-        }
-
-        // Derive capabilities from project roles
-        let store = self.inner.projects.lock().await;
-        let mut domains = Vec::new();
-        let mut tools = Vec::new();
-
-        for project in store.list() {
-            if project.status != crate::project::ProjectStatus::Active {
-                continue;
-            }
-            for agent in &project.agents {
-                if agent.name == agent_name {
-                    use crate::project::ProjectRole;
-                    match agent.role {
-                        ProjectRole::Developer => {
-                            tools.push("code-development".to_string());
-                            tools.push("bug-fixing".to_string());
-                        }
-                        ProjectRole::Reviewer => {
-                            tools.push("code-review".to_string());
-                            tools.push("testing".to_string());
-                        }
-                        ProjectRole::Owner | ProjectRole::Overseer => {
-                            tools.push("project-management".to_string());
-                            tools.push("coordination".to_string());
-                        }
-                        ProjectRole::Consultant => {
-                            tools.push("design-proposals".to_string());
-                        }
-                        ProjectRole::Tester => {
-                            tools.push("testing".to_string());
-                            tools.push("qa".to_string());
-                        }
-                        _ => {}
-                    }
-                    // Add project repo as a domain hint
-                    if let Some(ref repo) = project.repo {
-                        if repo.contains("rust") || repo.contains("agora") {
-                            domains.push("rust".to_string());
-                        }
-                    }
-                }
-            }
-        }
-        drop(store);
-
-        tools.sort();
-        tools.dedup();
-        domains.sort();
-        domains.dedup();
-
-        // Merge with existing entry (don't overwrite richer manual data)
-        let existing = self.marketplace_get(agent_name).await;
-        let (merged_domains, merged_tools, description) = if let Some(existing) = existing {
-            let mut d = existing.domains.clone();
-            d.extend(domains);
-            d.sort();
-            d.dedup();
-            let mut t = existing.tools.clone();
-            t.extend(tools);
-            t.sort();
-            t.dedup();
-            (d, t, existing.description.clone())
-        } else {
-            (domains, tools, None)
-        };
-
-        let caps = crate::marketplace::AgentCapabilities {
-            agent_name: agent_name.to_string(),
-            agent_did: None,
-            domains: merged_domains,
-            tools: merged_tools,
-            availability: crate::marketplace::AgentAvailability::Available,
-            description,
-            updated_at: chrono::Utc::now(),
-            address: None,
-        };
-
-        self.marketplace_upsert(caps).await;
-        info!("Auto-advertised '{}' in marketplace", agent_name);
-    }
-
     pub async fn project_clock_in(
         &self,
         project_id: &Uuid,
@@ -3235,34 +3116,8 @@ crate::config::agora_home()
             }
         }
 
-        // Record reputation contribution when task is completed
-        let assignee_for_rep = if became_done {
-            project
-                .tasks
-                .iter()
-                .find(|t| t.id == *task_id)
-                .and_then(|t| t.assignee.clone())
-        } else {
-            None
-        };
-
         let _ = store.save();
         drop(store);
-
-        // Record reputation outside the lock
-        if let Some(assignee) = assignee_for_rep {
-            self.reputation_record(crate::reputation::Contribution {
-                id: Uuid::new_v4(),
-                agent_name: assignee.clone(),
-                contribution_type: crate::reputation::ContributionType::TaskCompleted,
-                project_id: Some(*project_id),
-                quality: 1.0,
-                timestamp: chrono::Utc::now(),
-                description: None,
-            })
-            .await;
-            info!("Reputation recorded: {} completed a task", assignee);
-        }
 
         Ok(unblocked)
     }
@@ -3856,127 +3711,6 @@ crate::config::agora_home()
         let _ = store.save(&crate::discovery::DiscoveryStore::default_path());
     }
 
-    // --- Marketplace ---
-
-    pub async fn marketplace_get(
-        &self,
-        agent_name: &str,
-    ) -> Option<crate::marketplace::AgentCapabilities> {
-        let store = self.inner.marketplace.lock().await;
-        store.get(agent_name).cloned()
-    }
-
-    pub async fn marketplace_upsert(&self, caps: crate::marketplace::AgentCapabilities) -> bool {
-        let mut store = self.inner.marketplace.lock().await;
-        let updated = store.upsert(caps);
-        let _ = store.save(&crate::marketplace::MarketplaceStore::default_path());
-        updated
-    }
-
-    pub async fn marketplace_search(
-        &self,
-        query: &crate::marketplace::AgentSearchQuery,
-    ) -> Vec<crate::marketplace::AgentSearchResult> {
-        let store = self.inner.marketplace.lock().await;
-        store.search(query)
-    }
-
-    pub async fn marketplace_list(&self) -> Vec<crate::marketplace::AgentCapabilities> {
-        let store = self.inner.marketplace.lock().await;
-        store.list().to_vec()
-    }
-
-    pub async fn marketplace_remove(&self, agent_name: &str) -> bool {
-        let mut store = self.inner.marketplace.lock().await;
-        let removed = store.remove(agent_name);
-        let _ = store.save(&crate::marketplace::MarketplaceStore::default_path());
-        removed
-    }
-
-    // -----------------------------------------------------------------------
-    // Reputation
-    // -----------------------------------------------------------------------
-
-    pub async fn reputation_record(&self, contribution: crate::reputation::Contribution) {
-        let mut store = self.inner.reputation.lock().await;
-        store.record(contribution);
-        let _ = store.save(&crate::reputation::ReputationStore::default_path());
-    }
-
-    pub async fn reputation_get(&self, agent_name: &str) -> crate::reputation::AgentReputation {
-        let store = self.inner.reputation.lock().await;
-        store.reputation(agent_name)
-    }
-
-    pub async fn reputation_leaderboard(&self) -> Vec<crate::reputation::AgentReputation> {
-        let store = self.inner.reputation.lock().await;
-        store.leaderboard()
-    }
-
-    pub async fn reputation_recommendations(&self) -> Vec<crate::reputation::TrustRecommendation> {
-        let friends = self.inner.friends.lock().await;
-        let trusts: Vec<(String, u8)> = friends
-            .list()
-            .iter()
-            .map(|f| (f.name.clone(), f.trust_level.0))
-            .collect();
-        drop(friends);
-        let store = self.inner.reputation.lock().await;
-        store.recommendations(&trusts)
-    }
-
-    // -----------------------------------------------------------------------
-    // Coordinator
-    // -----------------------------------------------------------------------
-
-    pub async fn coordinator_suggestions(
-        &self,
-        project_id: &Uuid,
-    ) -> Vec<crate::coordinator::CoordinatorSuggestion> {
-        let store = self.inner.coordinator_suggestions.lock().await;
-        store.get(project_id).cloned().unwrap_or_default()
-    }
-
-    pub async fn coordinator_add_suggestions(
-        &self,
-        project_id: Uuid,
-        suggestions: Vec<crate::coordinator::CoordinatorSuggestion>,
-    ) {
-        let mut store = self.inner.coordinator_suggestions.lock().await;
-        let entry = store.entry(project_id).or_default();
-        // Keep only previously acted-on suggestions, then add fresh ones.
-        // This prevents duplicate suggestions from accumulating on repeated calls.
-        entry.retain(|s| s.acted_on);
-        entry.extend(suggestions);
-    }
-
-    pub async fn coordinator_act(&self, project_id: &Uuid, suggestion_id: &Uuid) -> bool {
-        let mut store = self.inner.coordinator_suggestions.lock().await;
-        if let Some(suggestions) = store.get_mut(project_id) {
-            if let Some(s) = suggestions.iter_mut().find(|s| s.id == *suggestion_id) {
-                s.acted_on = true;
-                return true;
-            }
-        }
-        false
-    }
-
-    pub async fn coordinator_add_digest(
-        &self,
-        project_id: Uuid,
-        digest: crate::coordinator::ProjectDigest,
-    ) {
-        let mut store = self.inner.coordinator_digests.lock().await;
-        store.entry(project_id).or_default().push(digest);
-    }
-
-    pub async fn coordinator_digests(
-        &self,
-        project_id: &Uuid,
-    ) -> Vec<crate::coordinator::ProjectDigest> {
-        let store = self.inner.coordinator_digests.lock().await;
-        store.get(project_id).cloned().unwrap_or_default()
-    }
 }
 
 // ---------------------------------------------------------------------------

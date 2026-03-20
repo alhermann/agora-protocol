@@ -13,7 +13,34 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
-use crate::marketplace::AgentCapabilities;
+/// Agent capabilities for discovery (local definition, replaces marketplace import).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentCapabilities {
+    pub agent_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_did: Option<String>,
+    #[serde(default)]
+    pub domains: Vec<String>,
+    #[serde(default)]
+    pub tools: Vec<String>,
+    #[serde(default)]
+    pub availability: AgentAvailability,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub updated_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub address: Option<String>,
+}
+
+/// Agent availability status.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum AgentAvailability {
+    #[default]
+    Available,
+    Busy,
+    Offline,
+}
 
 /// Maximum hops a gossip entry can travel before being dropped.
 pub const MAX_GOSSIP_HOPS: u8 = 3;
@@ -478,7 +505,7 @@ mod tests {
                 agent_did: None,
                 domains: vec!["rust".into()],
                 tools: vec!["code-review".into()],
-                availability: crate::marketplace::AgentAvailability::Available,
+                availability: AgentAvailability::Available,
                 description: None,
                 updated_at: Utc::now(),
                 address: None,
@@ -499,7 +526,7 @@ mod tests {
                 agent_did: None,
                 domains: vec!["python".into()],
                 tools: vec![],
-                availability: crate::marketplace::AgentAvailability::Available,
+                availability: AgentAvailability::Available,
                 description: None,
                 updated_at: Utc::now(),
                 address: None,

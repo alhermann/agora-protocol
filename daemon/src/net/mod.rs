@@ -68,18 +68,9 @@ fn payload_message<T: Serialize>(
     Ok(msg)
 }
 
-async fn collect_local_signed_capabilities(state: &DaemonState) -> Vec<SignedCapabilities> {
-    let our_did = state.did().to_string();
-    let our_name = state.node_name().to_string();
-    state
-        .marketplace_list()
-        .await
-        .into_iter()
-        .filter(|caps| {
-            caps.agent_name == our_name || caps.agent_did.as_deref() == Some(our_did.as_str())
-        })
-        .map(|caps| SignedCapabilities::sign(&caps, state.identity()))
-        .collect()
+async fn collect_local_signed_capabilities(_state: &DaemonState) -> Vec<SignedCapabilities> {
+    // Marketplace has been removed; no local capabilities to advertise via gossip.
+    Vec::new()
 }
 
 async fn collect_friend_introductions(state: &DaemonState, peer_name: &str) -> Vec<Introduction> {

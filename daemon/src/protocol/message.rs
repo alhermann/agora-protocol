@@ -153,30 +153,6 @@ pub enum MessageType {
     /// Delivery acknowledgement for offline message queue
     Ack,
 
-    // --- Marketplace types ---
-    /// Advertise agent capabilities
-    #[serde(rename = "marketplace.advertise")]
-    CapabilityAdvertise,
-    /// Search for agents by capability
-    #[serde(rename = "marketplace.search")]
-    AgentSearch,
-    /// Search results returned
-    #[serde(rename = "marketplace.search_result")]
-    AgentSearchResult,
-
-    // --- Reputation types ---
-    /// Broadcast a reputation update
-    #[serde(rename = "reputation.update")]
-    ReputationUpdate,
-
-    // --- Coordinator types ---
-    /// Coordinator project digest
-    #[serde(rename = "coordinator.digest")]
-    CoordinatorDigest,
-    /// Coordinator suggestion
-    #[serde(rename = "coordinator.suggestion")]
-    CoordinatorSuggestion,
-
     // --- Gossip / Discovery types ---
     /// Exchange signed capability entries with a peer
     #[serde(rename = "gossip.capabilities")]
